@@ -2,8 +2,9 @@
 
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { useSearchParams } from 'next/navigation';
+import { useSearchParams, useRouter, usePathname } from 'next/navigation';
 import { supabase } from '@/lib/supabase/client';
+
 import { 
   Users, 
   UserPlus, 
@@ -21,7 +22,8 @@ import {
   Stethoscope,
   Volume2,
   Building2,
-  IndianRupee
+  IndianRupee,
+  LogOut
 } from 'lucide-react';
 import { Department, Doctor } from '@/lib/types';
 
@@ -52,6 +54,9 @@ interface QueueTicket {
 export default function ReceptionDeskPage() {
   const searchParams = useSearchParams();
   const urlDoctorId = searchParams.get('doctor_id');
+  const router = useRouter();
+  const pathname = usePathname();
+
 
   const [departments, setDepartments] = useState<Department[]>([]);
   const [doctors, setDoctors] = useState<ExtendedDoctor[]>([]);
@@ -402,6 +407,17 @@ export default function ReceptionDeskPage() {
     }
   };
 
+  // ACTION 7: Sign out and redirect to login
+  const handleLogout = async () => {
+    try {
+      await supabase.auth.signOut();
+      router.push('/login');
+    } catch (err) {
+      console.error('Logout error:', err);
+      router.push('/login');
+    }
+  };
+
   const consultationFee = currentDoctor?.consultation_fee || 500;
   const estimatedCollection = todayCompletedCount * consultationFee;
 
@@ -443,7 +459,11 @@ export default function ReceptionDeskPage() {
                 <Stethoscope className="w-4 h-4 text-slate-500 ml-1.5" />
                 <select
                   value={selectedDoctorId}
-                  onChange={(e) => setSelectedDoctorId(e.target.value)}
+                  onChange={(e) => {    const newId = e.target.value;    
+                    setSelectedDoctorId(newId);    
+                    router.push(`${pathname}?doctor_id=${newId}`);
+                  }
+                }
                   className="bg-transparent text-slate-900 text-xs font-bold rounded-lg pr-2 py-1 focus:outline-hidden"
                 >
                   {doctors.map((doc) => (
@@ -490,6 +510,16 @@ export default function ReceptionDeskPage() {
             >
               <UserPlus className="w-4 h-4" />
               <span>+ Add Walk-In</span>
+            </button>
+
+            {/* Log Out Button */}
+            <button
+              onClick={handleLogout}
+              className="flex items-center space-x-1.5 bg-slate-100 hover:bg-rose-50 hover:text-rose-600 text-slate-600 border border-slate-200 hover:border-rose-200 px-3 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer"
+              title="Log Out of Clinic Session"
+            >
+              <LogOut className="w-4 h-4" />
+              <span>Log Out</span>
             </button>
           </div>
         </div>
