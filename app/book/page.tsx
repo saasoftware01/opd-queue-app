@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useMemo } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { supabase } from '@/lib/supabase/client';
 import { 
   Search, 
@@ -17,7 +18,9 @@ import {
   ShieldCheck, 
   ArrowRight,
   Printer,
-  Sparkles
+  Sparkles,
+  Users,
+  Compass
 } from 'lucide-react';
 
 interface DoctorDirectoryItem {
@@ -31,6 +34,8 @@ interface DoctorDirectoryItem {
   booking_fee: number;
   department_id: string | null;
   department_name: string;
+  waiting_count?: number;
+  current_token?: string | null;
 }
 
 interface ConfirmedTicket {
@@ -42,52 +47,85 @@ interface ConfirmedTicket {
   clinic_name: string;
   room_number: string;
   booking_amount: number;
+  status: string;
+  created_at?: string;
 }
 
 export default function DoctorBookingDirectoryPage() {
+  const searchParams = useSearchParams();
+  const urlClinicId = searchParams.get('clinic_id');
+  const urlDoctorId = searchParams.get('doctor_id');
+
+  // Tabs: 'DIRECTORY' or 'TRACKER'
+  const [activeTab, setActiveTab] = useState<'DIRECTORY' | 'TRACKER'>('DIRECTORY');
+
   const [doctors, setDoctors] = useState<DoctorDirectoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   
-  // Selected doctor for booking
+  // Selected doctor for booking modal
   const [selectedDoctor, setSelectedDoctor] = useState<DoctorDirectoryItem | null>(null);
   
-  // Form fields
+  // Form fields for new booking
   const [patientName, setPatientName] = useState('');
   const [phone, setPhone] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   
-  // Confirmed slip state
+  // Confirmed slip / Active tracked ticket
   const [confirmedTicket, setConfirmedTicket] = useState<ConfirmedTicket | null>(null);
   const [cancelLoading, setCancelLoading] = useState(false);
 
-  // 1. Fetch all active doctors with clinic & department fallback
+  // Live queue tracking counters
+  const [nowServingToken, setNowServingToken] = useState<string | null>(null);
+  const [patientsAhead, setPatientsAhead] = useState<number>(0);
+
+  // Phone search state for "Track My Turn" tab
+  const [trackerPhone, setTrackerPhone] = useState('');
+  const [trackerLoading, setTrackerLoading] = useState(false);
+  const [trackerError, setTrackerError] = useState('');
+
+  // 1. Fetch all doctors and their live queue metrics for today
   useEffect(() => {
     async function loadDirectory() {
       try {
+        setLoading(true);
+        const today = new Date().toISOString().split('T')[0];
+
+        // Fetch doctors
         const { data: docData, error: docErr } = await supabase
           .from('doctors')
           .select('*')
           .order('created_at', { ascending: false });
 
         if (docErr) throw docErr;
-
         if (!docData || docData.length === 0) {
           setDoctors([]);
           return;
         }
 
-        // Fetch clinics and departments for client-side mapping
-        const { data: clinicsData } = await supabase.from('clinics').select('id, name, booking_fee');
-        const { data: deptsData } = await supabase.from('departments').select('id, name');
+        // Fetch clinics, departments, and today's tickets
+        const [clinicsRes, deptsRes, ticketsRes] = await Promise.all([
+          supabase.from('clinics').select('id, name, booking_fee'),
+          supabase.from('departments').select('id, name'),
+          supabase
+            .from('tickets')
+            .select('id, doctor_id, status, token_number')
+            .gte('created_at', `${today}T00:00:00.000Z`)
+        ]);
 
-        const clinicMap = new Map((clinicsData || []).map((c: any) => [c.id, c]));
-        const deptMap = new Map((deptsData || []).map((d: any) => [d.id, d.name]));
+        const clinicMap = new Map((clinicsRes.data || []).map((c: any) => [c.id, c]));
+        const deptMap = new Map((deptsRes.data || []).map((d: any) => [d.id, d.name]));
+        const todayTickets = ticketsRes.data || [];
 
         const formatted: DoctorDirectoryItem[] = docData.map((doc: any) => {
           const clinic = doc.clinic_id ? clinicMap.get(doc.clinic_id) : null;
           const deptName = doc.department_id ? deptMap.get(doc.department_id) : null;
+
+          // Compute real-time queue metrics for this doctor
+          const docTickets = todayTickets.filter((t: any) => t.doctor_id === doc.id);
+          const waitingCount = docTickets.filter((t: any) => t.status === 'waiting').length;
+          const activeConsultation = docTickets.find((t: any) => t.status === 'in-consultation');
 
           return {
             id: doc.id,
@@ -100,10 +138,18 @@ export default function DoctorBookingDirectoryPage() {
             booking_fee: Number(clinic?.booking_fee) || 0,
             department_id: doc.department_id || null,
             department_name: deptName || 'General OPD',
+            waiting_count: waitingCount,
+            current_token: activeConsultation?.token_number || null,
           };
         });
 
         setDoctors(formatted);
+
+        // If URL has doctor_id, auto-select for booking modal
+        if (urlDoctorId) {
+          const matched = formatted.find(d => d.id === urlDoctorId);
+          if (matched) setSelectedDoctor(matched);
+        }
       } catch (err: any) {
         console.error('Failed to load doctor directory:', err);
       } finally {
@@ -112,21 +158,91 @@ export default function DoctorBookingDirectoryPage() {
     }
 
     loadDirectory();
-  }, []);
+  }, [urlDoctorId, urlClinicId]);
 
-  // 2. Filter doctors by name, clinic, or specialty
+  // 2. Realtime Live Queue Tracker for the confirmed ticket
+  useEffect(() => {
+    if (!confirmedTicket) return;
+
+    const activeTicketId = confirmedTicket.id;
+
+    async function syncLiveQueuePosition() {
+      try {
+        const today = new Date().toISOString().split('T')[0];
+
+        // Fetch current ticket's latest status
+        const { data: currentT } = await supabase
+          .from('tickets')
+          .select('status, token_number, created_at, doctor_id')
+          .eq('id', activeTicketId)
+          .single();
+
+        if (currentT) {
+          setConfirmedTicket(prev => prev ? { ...prev, status: currentT.status } : null);
+
+          // Fetch who is currently inside the cabin
+          const { data: inCabin } = await supabase
+            .from('tickets')
+            .select('token_number')
+            .eq('doctor_id', currentT.doctor_id)
+            .eq('status', 'in-consultation')
+            .gte('created_at', `${today}T00:00:00.000Z`)
+            .maybeSingle();
+
+          setNowServingToken(inCabin?.token_number || 'None');
+
+          // Count how many waiting patients are ahead of this ticket
+          const { count } = await supabase
+            .from('tickets')
+            .select('*', { count: 'exact', head: true })
+            .eq('doctor_id', currentT.doctor_id)
+            .eq('status', 'waiting')
+            .gte('created_at', `${today}T00:00:00.000Z`)
+            .lt('created_at', currentT.created_at);
+
+          setPatientsAhead(count || 0);
+        }
+      } catch (err) {
+        console.error('Queue sync error:', err);
+      }
+    }
+
+    syncLiveQueuePosition();
+
+    const channel = supabase
+      .channel(`live-ticket-${activeTicketId}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'tickets' },
+        () => {
+          syncLiveQueuePosition();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [confirmedTicket?.id]);
+
+  // 3. Filter doctors by Search Query or Clinic Parameter
   const filteredDoctors = useMemo(() => {
+    let list = doctors;
+    if (urlClinicId) {
+      list = list.filter(d => d.clinic_id === urlClinicId);
+    }
     const q = searchQuery.toLowerCase().trim();
-    if (!q) return doctors;
-    return doctors.filter(
+    if (!q) return list;
+
+    return list.filter(
       (d) =>
         d.name.toLowerCase().includes(q) ||
         d.clinic_name.toLowerCase().includes(q) ||
         d.department_name.toLowerCase().includes(q)
     );
-  }, [doctors, searchQuery]);
+  }, [doctors, searchQuery, urlClinicId]);
 
-  // 3. Quick Booking Submission
+  // 4. Quick Booking Submission
   const handleBooking = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedDoctor) return;
@@ -142,7 +258,7 @@ export default function DoctorBookingDirectoryPage() {
 
       const today = new Date().toISOString().split('T')[0];
 
-      // Check for active token today with this phone_number (using lowercase statuses)
+      // Check if already booked today
       const { data: existingTicket } = await supabase
         .from('tickets')
         .select('id, token_number, status')
@@ -166,7 +282,7 @@ export default function DoctorBookingDirectoryPage() {
       const nextNum = (count || 0) + 1;
       const tokenNumber = `T-${String(nextNum).padStart(3, '0')}`;
 
-      // Insert new OPD ticket (Exact column names and lowercase enums matching ReceptionDesk)
+      // Insert new ticket
       const { data: ticketData, error: ticketError } = await supabase
         .from('tickets')
         .insert([
@@ -196,10 +312,10 @@ export default function DoctorBookingDirectoryPage() {
         clinic_name: selectedDoctor.clinic_name,
         room_number: selectedDoctor.room_number,
         booking_amount: selectedDoctor.booking_fee,
+        status: ticketData.status,
       });
 
       setSelectedDoctor(null);
-
     } catch (err: any) {
       console.error('Booking submission failed:', err);
       setErrorMsg(err.message || 'Booking failed. Please try again.');
@@ -208,7 +324,70 @@ export default function DoctorBookingDirectoryPage() {
     }
   };
 
-  // 4. Cancel Ticket
+  // 5. Track My Token by Phone Number
+  const handleTrackByPhone = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setTrackerError('');
+    setTrackerLoading(true);
+
+    try {
+      const cleanPhone = trackerPhone.trim().replace(/\D/g, '');
+      if (cleanPhone.length < 10) {
+        throw new Error('Please enter a valid 10-digit mobile number.');
+      }
+
+      const today = new Date().toISOString().split('T')[0];
+
+      const { data: ticket, error: ticketErr } = await supabase
+        .from('tickets')
+        .select(`
+          id,
+          token_number,
+          patient_name,
+          phone_number,
+          status,
+          created_at,
+          doctors (
+            name,
+            room_number,
+            clinic_name
+          )
+        `)
+        .eq('phone_number', cleanPhone)
+        .gte('created_at', `${today}T00:00:00.000Z`)
+        .in('status', ['waiting', 'in-consultation', 'completed'])
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (ticketErr) throw ticketErr;
+      if (!ticket) {
+        throw new Error('No active token found for this mobile number today.');
+      }
+
+      const docInfo: any = ticket.doctors;
+
+      setConfirmedTicket({
+        id: ticket.id,
+        token_number: ticket.token_number,
+        patient_name: ticket.patient_name,
+        phone: ticket.phone_number,
+        doctor_name: docInfo?.name || 'Doctor',
+        clinic_name: docInfo?.clinic_name || 'Care Clinic',
+        room_number: docInfo?.room_number || 'Room 1',
+        booking_amount: 0,
+        status: ticket.status,
+        created_at: ticket.created_at,
+      });
+
+    } catch (err: any) {
+      setTrackerError(err.message || 'Unable to track token.');
+    } finally {
+      setTrackerLoading(false);
+    }
+  };
+
+  // 6. Cancel Ticket
   const handleCancelBooking = async () => {
     if (!confirmedTicket) return;
     const confirm = window.confirm('Are you sure you want to cancel this consultation token?');
@@ -250,46 +429,101 @@ export default function DoctorBookingDirectoryPage() {
                 <Stethoscope className="w-6 h-6" />
               </div>
               <div>
-                <h1 className="text-xl font-black tracking-tight">MediQueue Doctor Search</h1>
-                <p className="text-xs text-slate-400">Search doctor, check OPD slots & get instant live tokens</p>
+                <h1 className="text-xl font-black tracking-tight">MediQueue Patient Portal</h1>
+                <p className="text-xs text-slate-400">Quick token booking & real-time queue tracker</p>
               </div>
             </div>
 
-            <div className="inline-flex items-center gap-2 self-start sm:self-auto px-3 py-1.5 rounded-full bg-slate-900 border border-slate-800 text-[11px] font-bold text-slate-300">
-              <Sparkles className="w-3.5 h-3.5 text-blue-400" />
-              <span>Direct OPD Token Booking</span>
+            {/* TAB SELECTOR */}
+            <div className="flex bg-slate-900 p-1 rounded-2xl border border-slate-800 self-start sm:self-auto">
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab('DIRECTORY');
+                  setConfirmedTicket(null);
+                }}
+                className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                  activeTab === 'DIRECTORY'
+                    ? 'bg-blue-600 text-white shadow-sm'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                Book New Token
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab('TRACKER');
+                  setConfirmedTicket(null);
+                }}
+                className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                  activeTab === 'TRACKER'
+                    ? 'bg-blue-600 text-white shadow-sm'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                Track My Turn
+              </button>
             </div>
           </div>
 
-          {/* Search Box */}
-          <div className="mt-6 relative max-w-2xl">
-            <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-slate-400">
-              <Search className="w-5 h-5" />
+          {/* Search Box (Only on Directory tab) */}
+          {activeTab === 'DIRECTORY' && (
+            <div className="mt-6 relative max-w-2xl">
+              <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-slate-400">
+                <Search className="w-5 h-5" />
+              </div>
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search by doctor name, clinic, or specialty..."
+                className="w-full bg-slate-900/90 border border-slate-700/80 rounded-2xl pl-12 pr-4 py-3.5 text-sm text-white placeholder-slate-400 focus:outline-hidden focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all shadow-inner"
+              />
             </div>
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search by doctor name, clinic name, or specialty..."
-              className="w-full bg-slate-900/90 border border-slate-700/80 rounded-2xl pl-12 pr-4 py-3.5 text-sm text-white placeholder-slate-400 focus:outline-hidden focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all shadow-inner"
-            />
-          </div>
+          )}
         </div>
       </header>
 
       {/* Main Container */}
       <main className="max-w-5xl mx-auto px-4 sm:px-6 mt-8">
         
-        {/* SUCCESS CONFIRMATION SLIP */}
+        {/* VIEW 1: ACTIVE / CONFIRMED TOKEN SLIP & LIVE TRACKER */}
         {confirmedTicket && (
           <div className="mb-10 max-w-md mx-auto bg-white rounded-3xl shadow-2xl border border-slate-200 overflow-hidden animate-in fade-in duration-200">
-            <div className="bg-emerald-600 p-6 text-white text-center">
-              <CheckCircle2 className="w-12 h-12 mx-auto mb-2 text-emerald-100" />
-              <h2 className="text-xl font-black tracking-tight">Token Confirmed!</h2>
-              <p className="text-xs text-emerald-100 mt-0.5">Show this token at the clinic reception counter</p>
+            
+            {/* Dynamic Status Header */}
+            <div className={`p-6 text-white text-center transition-all ${
+              confirmedTicket.status === 'completed'
+                ? 'bg-emerald-600'
+                : confirmedTicket.status === 'in-consultation'
+                ? 'bg-blue-600 animate-pulse'
+                : patientsAhead === 0 && confirmedTicket.status === 'waiting'
+                ? 'bg-indigo-600'
+                : 'bg-slate-900'
+            }`}>
+              <CheckCircle2 className="w-12 h-12 mx-auto mb-2 text-white/90" />
+              <h2 className="text-xl font-black tracking-tight">
+                {confirmedTicket.status === 'completed'
+                  ? 'Consultation Completed'
+                  : confirmedTicket.status === 'in-consultation'
+                  ? '🔔 It’s Your Turn! Please Enter Cabin'
+                  : patientsAhead === 0 && confirmedTicket.status === 'waiting'
+                  ? 'You Are Next in Line!'
+                  : 'Token Confirmed & Queued'}
+              </h2>
+              <p className="text-xs text-white/80 mt-0.5">
+                {confirmedTicket.status === 'completed'
+                  ? 'Thank you for visiting! Wishing you a speedy recovery.'
+                  : confirmedTicket.status === 'in-consultation'
+                  ? `Proceed inside ${confirmedTicket.room_number}`
+                  : 'Live updates active · Keep this screen open'}
+              </p>
             </div>
 
             <div className="p-6 sm:p-8 space-y-6">
+              
+              {/* Token Number Display */}
               <div className="text-center py-4 bg-slate-50 rounded-2xl border border-slate-200/60">
                 <span className="text-xs font-bold text-slate-400 uppercase tracking-widest block mb-1">
                   Your Token Number
@@ -299,6 +533,49 @@ export default function DoctorBookingDirectoryPage() {
                 </span>
               </div>
 
+              {/* LIVE QUEUE OR COMPLETED SUMMARY */}
+              {confirmedTicket.status === 'completed' ? (
+                <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-center space-y-2">
+                  <div className="text-xs font-bold text-emerald-800 uppercase tracking-wide">
+                    Visit Complete
+                  </div>
+                  <p className="text-xs text-emerald-700 leading-relaxed">
+                    Please collect your prescription and medical receipts from the reception counter or pharmacy desk.
+                  </p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 gap-3 p-4 rounded-2xl bg-blue-50/60 border border-blue-100">
+                  <div className="text-center border-r border-blue-200/60 pr-2">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
+                      Now In Cabin
+                    </span>
+                    <span className="text-2xl font-black text-slate-900 font-mono">
+                      {nowServingToken || '—'}
+                    </span>
+                  </div>
+
+                  <div className="text-center pl-2">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
+                      Patients Ahead
+                    </span>
+                    <span className="text-2xl font-black text-blue-600 font-mono">
+                      {confirmedTicket.status === 'in-consultation' ? '0' : patientsAhead}
+                    </span>
+                  </div>
+
+                  <div className="col-span-2 pt-2 border-t border-blue-200/40 text-center">
+                    <span className="text-xs font-semibold text-slate-600">
+                      {confirmedTicket.status === 'in-consultation' ? (
+                        <span className="text-blue-700 font-bold">Doctor is consulting you now.</span>
+                      ) : (
+                        <>Est. Wait Time: <strong className="text-slate-900">~{patientsAhead * 10} minutes</strong></>
+                      )}
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* Consultation Details */}
               <div className="space-y-3 text-xs border-y border-slate-100 py-4">
                 <div className="flex justify-between items-center">
                   <span className="text-slate-400 font-medium">Patient:</span>
@@ -313,17 +590,28 @@ export default function DoctorBookingDirectoryPage() {
                   <span className="font-bold text-slate-800">{confirmedTicket.doctor_name} ({confirmedTicket.room_number})</span>
                 </div>
                 <div className="flex justify-between items-center">
-                  <span className="text-slate-400 font-medium">Mobile:</span>
+                  <span className="text-slate-400 font-medium">Registered Mobile:</span>
                   <span className="font-bold text-slate-800">+91 {confirmedTicket.phone}</span>
                 </div>
                 <div className="flex justify-between items-center">
-                  <span className="text-slate-400 font-medium">Booking Fee:</span>
-                  <span className="font-black text-emerald-600">
-                    {confirmedTicket.booking_amount === 0 ? 'FREE' : `₹${confirmedTicket.booking_amount}`}
+                  <span className="text-slate-400 font-medium">Status:</span>
+                  <span className={`font-black uppercase text-xs ${
+                    confirmedTicket.status === 'completed' 
+                      ? 'text-emerald-600' 
+                      : confirmedTicket.status === 'in-consultation' 
+                      ? 'text-blue-600' 
+                      : 'text-amber-600'
+                  }`}>
+                    {confirmedTicket.status === 'completed'
+                      ? '✅ Completed'
+                      : confirmedTicket.status === 'in-consultation'
+                      ? '🟢 Consulting Now'
+                      : '🟡 In Waiting Line'}
                   </span>
                 </div>
               </div>
 
+              {/* Action Buttons */}
               <div className="space-y-2.5">
                 <button
                   type="button"
@@ -331,33 +619,93 @@ export default function DoctorBookingDirectoryPage() {
                   className="w-full py-3 rounded-xl bg-slate-900 hover:bg-black text-white text-xs font-bold transition-colors cursor-pointer flex items-center justify-center gap-2"
                 >
                   <Printer className="w-4 h-4" />
-                  <span>Print / Save Slip</span>
+                  <span>Print / Save Visit Slip</span>
                 </button>
 
-                <button
-                  type="button"
-                  disabled={cancelLoading}
-                  onClick={handleCancelBooking}
-                  className="w-full py-2.5 rounded-xl border border-rose-200 hover:bg-rose-50 text-rose-600 text-xs font-bold transition-colors flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
-                >
-                  <XCircle className="w-4 h-4" />
-                  <span>{cancelLoading ? 'Cancelling Token...' : 'Cancel My Booking'}</span>
-                </button>
+                {confirmedTicket.status === 'waiting' && (
+                  <button
+                    type="button"
+                    disabled={cancelLoading}
+                    onClick={handleCancelBooking}
+                    className="w-full py-2.5 rounded-xl border border-rose-200 hover:bg-rose-50 text-rose-600 text-xs font-bold transition-colors flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                  >
+                    <XCircle className="w-4 h-4" />
+                    <span>{cancelLoading ? 'Cancelling Token...' : 'Cancel My Booking'}</span>
+                  </button>
+                )}
 
                 <button
                   type="button"
                   onClick={() => setConfirmedTicket(null)}
-                  className="w-full py-2 text-xs font-bold text-slate-400 hover:text-slate-600 transition-colors cursor-pointer"
+                  className={`w-full py-2.5 text-xs font-bold rounded-xl transition-colors cursor-pointer ${
+                    confirmedTicket.status === 'completed'
+                      ? 'bg-blue-50 text-blue-700 hover:bg-blue-100'
+                      : 'text-slate-400 hover:text-slate-600'
+                  }`}
                 >
-                  ← Book for Another Patient
+                  {confirmedTicket.status === 'completed' ? 'Done / Back to Home' : '← Back to Portal'}
                 </button>
               </div>
+
             </div>
           </div>
         )}
 
-        {/* DOCTOR DIRECTORY LIST */}
-        {!confirmedTicket && (
+        {/* VIEW 2: TRACK MY TOKEN TAB */}
+        {activeTab === 'TRACKER' && !confirmedTicket && (
+          <div className="max-w-md mx-auto bg-white rounded-3xl p-6 sm:p-8 shadow-xl border border-slate-200">
+            <div className="text-center mb-6">
+              <div className="w-12 h-12 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center mx-auto mb-3">
+                <Compass className="w-6 h-6" />
+              </div>
+              <h2 className="text-lg font-black text-slate-900">Track Today's Token</h2>
+              <p className="text-xs text-slate-500 mt-1">
+                Enter the mobile number you used while booking to check your live queue status.
+              </p>
+            </div>
+
+            {trackerError && (
+              <div className="mb-4 p-3 rounded-2xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-semibold flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 text-rose-500 mt-0.5" />
+                <span className="flex-1">{trackerError}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleTrackByPhone} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                  Your 10-Digit Mobile Number
+                </label>
+                <div className="relative">
+                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                    <Phone className="w-4 h-4" />
+                  </div>
+                  <input
+                    type="tel"
+                    required
+                    maxLength={10}
+                    value={trackerPhone}
+                    onChange={(e) => setTrackerPhone(e.target.value)}
+                    placeholder="e.g. 9876543210"
+                    className="w-full bg-slate-50 border border-slate-300 rounded-xl pl-10 pr-4 py-3 text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-600 focus:outline-hidden"
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={trackerLoading}
+                className="w-full py-3.5 rounded-xl shadow-md text-xs font-black text-white bg-blue-600 hover:bg-blue-700 active:scale-95 disabled:opacity-50 transition-all cursor-pointer flex items-center justify-center gap-2"
+              >
+                <span>{trackerLoading ? 'Checking Queue...' : 'Find My Token'}</span>
+                <ArrowRight className="w-4 h-4" />
+              </button>
+            </form>
+          </div>
+        )}
+
+        {/* VIEW 3: DOCTOR DIRECTORY LIST */}
+        {activeTab === 'DIRECTORY' && !confirmedTicket && (
           <div>
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-sm font-black text-slate-500 uppercase tracking-wider">
@@ -410,6 +758,15 @@ export default function DoctorBookingDirectoryPage() {
                       <div className="mt-2.5 flex items-center gap-1.5 text-[11px] font-semibold text-slate-400">
                         <Clock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                         <span>{doc.opd_timing} ({doc.opd_shift})</span>
+                      </div>
+
+                      {/* Live Queue Pulse Indicator */}
+                      <div className="mt-3.5 py-2 px-3 rounded-xl bg-slate-50 border border-slate-100 flex items-center justify-between text-xs">
+                        <span className="text-slate-500 font-medium flex items-center gap-1.5">
+                          <Users className="w-3.5 h-3.5 text-blue-600" />
+                          <span>Waiting in line:</span>
+                        </span>
+                        <span className="font-bold text-slate-900">{doc.waiting_count || 0} patients</span>
                       </div>
                     </div>
 
