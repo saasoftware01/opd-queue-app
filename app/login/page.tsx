@@ -26,7 +26,7 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
 
-  const handleLogin = async (e: React.FormEvent) => {
+    const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setErrorMsg('');
@@ -46,26 +46,23 @@ export default function LoginPage() {
         .from('clinics')
         .select('id, name, type')
         .eq('owner_id', authData.user.id)
-        .maybeSingle();
+        .single();
 
       if (clinicError || !clinic) {
         router.push('/reception');
         return;
       }
 
-      // 3. If Solo Clinic, pin directly to the doctor's desk
-      if (clinic.type === 'SOLO_CLINIC') {
-        const { data: doc } = await supabase
-          .from('doctors')
-          .select('id')
-          .eq('clinic_id', clinic.id)
-          .limit(1)
-          .maybeSingle();
+      // 3. Pin directly to the doctor belonging exclusively to THIS clinic
+      const { data: doc } = await supabase
+        .from('doctors')
+        .select('id')
+        .eq('clinic_id', clinic.id)
+        .single();
 
-        if (doc) {
-          router.push(`/reception?doctor_id=${doc.id}`);
-          return;
-        }
+      if (doc) {
+        router.push(`/reception?doctor_id=${doc.id}`);
+        return;
       }
 
       // Hospital / Multi-doctor routes to general desk
