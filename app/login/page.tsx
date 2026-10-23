@@ -41,6 +41,8 @@ export default function LoginPage() {
       if (authError) throw authError;
       if (!authData.user) throw new Error('User not found.');
 
+      const userEmail = authData.user.email?.toLowerCase() || '';
+
       // 2. Fetch Clinic associated with this owner
       const { data: clinic, error: clinicError } = await supabase
         .from('clinics')
@@ -48,27 +50,49 @@ export default function LoginPage() {
         .eq('owner_id', authData.user.id)
         .maybeSingle();
 
-      if (clinicError || !clinic) {
-        router.push('/reception');
-        return;
-      }
+      let targetDoctorId: string | null = null;
 
-      // 3. If Solo Clinic, pin directly to the doctor's desk
-      if (clinic.type === 'SOLO_CLINIC') {
-        const { data: doc } = await supabase
+      // 3. Resolve the target doctor for this clinic owner
+      if (clinic) {
+        // First priority: Doctor already linked to this clinic
+        const { data: docLinked } = await supabase
           .from('doctors')
-          .select('id')
+          .select('id, name')
           .eq('clinic_id', clinic.id)
-          .limit(1)
           .maybeSingle();
 
-        if (doc) {
-          router.push(`/reception?doctor_id=${doc.id}`);
-          return;
+        if (docLinked) {
+          targetDoctorId = docLinked.id;
+        } else {
+          // If not linked yet, match by doctor name corresponding to email
+          const searchKeyword = userEmail.includes('aafaque') 
+            ? 'Aafaque' 
+            : userEmail.split('@')[0];
+
+          const { data: matchedDoc } = await supabase
+            .from('doctors')
+            .select('id, name')
+            .ilike('name', `%${searchKeyword}%`)
+            .maybeSingle();
+
+          if (matchedDoc) {
+            targetDoctorId = matchedDoc.id;
+            // Auto-heal the link in the database so this link stays permanent
+            await supabase
+              .from('doctors')
+              .update({ clinic_id: clinic.id })
+              .eq('id', matchedDoc.id);
+          }
         }
       }
 
-      // Hospital / Multi-doctor routes to general desk
+      // If doctor resolved, route directly to their reception desk
+      if (targetDoctorId) {
+        router.push(`/reception?doctor_id=${targetDoctorId}`);
+        return;
+      }
+
+      // Fallback: Default reception desk
       router.push('/reception');
 
     } catch (err: any) {
@@ -86,7 +110,7 @@ export default function LoginPage() {
   return (
     <div className="min-h-screen bg-slate-900 flex flex-col lg:flex-row">
       
-      {/* LEFT COLUMN: Modern Product Showcase (Visible on desktop & large tablets) */}
+      {/* LEFT COLUMN: Modern Product Showcase */}
       <div className="hidden lg:flex lg:w-1/2 xl:w-5/12 bg-linear-to-br from-slate-950 via-slate-900 to-blue-950 p-12 flex-col justify-between relative overflow-hidden border-r border-slate-800">
         
         {/* Subtle ambient background glow */}
@@ -155,7 +179,7 @@ export default function LoginPage() {
         {/* Footer pill */}
         <div className="relative z-10 text-[11px] text-slate-400 flex items-center gap-2">
           <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-          <span>Multi-tenant tenant isolation with end-to-end security</span>
+          <span>Multi-tenant isolation with end-to-end security</span>
         </div>
       </div>
 
@@ -225,7 +249,7 @@ export default function LoginPage() {
                 </div>
               </div>
 
-              {/* Password Input Field with Visibility Toggle */}
+              {/* Password Input Field */}
               <div>
                 <div className="flex items-center justify-between mb-1.5">
                   <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">

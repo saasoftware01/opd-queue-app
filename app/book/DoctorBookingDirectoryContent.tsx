@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { supabase } from '@/lib/supabase/client';
 import { 
@@ -18,7 +18,6 @@ import {
   ShieldCheck, 
   ArrowRight,
   Printer,
-  Sparkles,
   Users,
   Compass
 } from 'lucide-react';
@@ -51,10 +50,10 @@ interface ConfirmedTicket {
   created_at?: string;
 }
 
-export default function DoctorBookingDirectoryPage() {
+function DoctorBookingDirectoryContent() {
   const searchParams = useSearchParams();
-  const urlClinicId = searchParams.get('clinic_id');
-  const urlDoctorId = searchParams.get('doctor_id');
+  const urlClinicId = searchParams?.get('clinic_id') || null;
+  const urlDoctorId = searchParams?.get('doctor_id') || null;
 
   // Tabs: 'DIRECTORY' or 'TRACKER'
   const [activeTab, setActiveTab] = useState<'DIRECTORY' | 'TRACKER'>('DIRECTORY');
@@ -87,25 +86,16 @@ export default function DoctorBookingDirectoryPage() {
 
   // 1. Fetch all doctors and their live queue metrics for today
   useEffect(() => {
+    let isMounted = true;
+
     async function loadDirectory() {
       try {
         setLoading(true);
         const today = new Date().toISOString().split('T')[0];
 
-        // Fetch doctors
-        const { data: docData, error: docErr } = await supabase
-          .from('doctors')
-          .select('*')
-          .order('created_at', { ascending: false });
-
-        if (docErr) throw docErr;
-        if (!docData || docData.length === 0) {
-          setDoctors([]);
-          return;
-        }
-
-        // Fetch clinics, departments, and today's tickets
-        const [clinicsRes, deptsRes, ticketsRes] = await Promise.all([
+        // Safe parallel queries using allSettled so one table never breaks the others
+        const [docRes, clinicsRes, deptsRes, ticketsRes] = await Promise.allSettled([
+          supabase.from('doctors').select('*').order('created_at', { ascending: false }),
           supabase.from('clinics').select('id, name, booking_fee'),
           supabase.from('departments').select('id, name'),
           supabase
@@ -114,15 +104,26 @@ export default function DoctorBookingDirectoryPage() {
             .gte('created_at', `${today}T00:00:00.000Z`)
         ]);
 
-        const clinicMap = new Map((clinicsRes.data || []).map((c: any) => [c.id, c]));
-        const deptMap = new Map((deptsRes.data || []).map((d: any) => [d.id, d.name]));
-        const todayTickets = ticketsRes.data || [];
+        const docData = docRes.status === 'fulfilled' && docRes.value.data ? docRes.value.data : [];
+        const clinicsData = clinicsRes.status === 'fulfilled' && clinicsRes.value.data ? clinicsRes.value.data : [];
+        const deptsData = deptsRes.status === 'fulfilled' && deptsRes.value.data ? deptsRes.value.data : [];
+        const todayTickets = ticketsRes.status === 'fulfilled' && ticketsRes.value.data ? ticketsRes.value.data : [];
+
+        if (!isMounted) return;
+
+        if (docData.length === 0) {
+          setDoctors([]);
+          setLoading(false);
+          return;
+        }
+
+        const clinicMap = new Map(clinicsData.map((c: any) => [c.id, c]));
+        const deptMap = new Map(deptsData.map((d: any) => [d.id, d.name]));
 
         const formatted: DoctorDirectoryItem[] = docData.map((doc: any) => {
           const clinic = doc.clinic_id ? clinicMap.get(doc.clinic_id) : null;
           const deptName = doc.department_id ? deptMap.get(doc.department_id) : null;
 
-          // Compute real-time queue metrics for this doctor
           const docTickets = todayTickets.filter((t: any) => t.doctor_id === doc.id);
           const waitingCount = docTickets.filter((t: any) => t.status === 'waiting').length;
           const activeConsultation = docTickets.find((t: any) => t.status === 'in-consultation');
@@ -145,19 +146,23 @@ export default function DoctorBookingDirectoryPage() {
 
         setDoctors(formatted);
 
-        // If URL has doctor_id, auto-select for booking modal
         if (urlDoctorId) {
           const matched = formatted.find(d => d.id === urlDoctorId);
           if (matched) setSelectedDoctor(matched);
         }
       } catch (err: any) {
         console.error('Failed to load doctor directory:', err);
+        if (isMounted) setDoctors([]);
       } finally {
-        setLoading(false);
+        if (isMounted) setLoading(false);
       }
     }
 
     loadDirectory();
+
+    return () => {
+      isMounted = false;
+    };
   }, [urlDoctorId, urlClinicId]);
 
   // 2. Realtime Live Queue Tracker for the confirmed ticket
@@ -170,7 +175,6 @@ export default function DoctorBookingDirectoryPage() {
       try {
         const today = new Date().toISOString().split('T')[0];
 
-        // Fetch current ticket's latest status
         const { data: currentT } = await supabase
           .from('tickets')
           .select('status, token_number, created_at, doctor_id')
@@ -180,7 +184,6 @@ export default function DoctorBookingDirectoryPage() {
         if (currentT) {
           setConfirmedTicket(prev => prev ? { ...prev, status: currentT.status } : null);
 
-          // Fetch who is currently inside the cabin
           const { data: inCabin } = await supabase
             .from('tickets')
             .select('token_number')
@@ -191,7 +194,6 @@ export default function DoctorBookingDirectoryPage() {
 
           setNowServingToken(inCabin?.token_number || 'None');
 
-          // Count how many waiting patients are ahead of this ticket
           const { count } = await supabase
             .from('tickets')
             .select('*', { count: 'exact', head: true })
@@ -258,7 +260,6 @@ export default function DoctorBookingDirectoryPage() {
 
       const today = new Date().toISOString().split('T')[0];
 
-      // Check if already booked today
       const { data: existingTicket } = await supabase
         .from('tickets')
         .select('id, token_number, status')
@@ -272,7 +273,6 @@ export default function DoctorBookingDirectoryPage() {
         throw new Error(`You already have an active Token (#${existingTicket.token_number}) in queue today.`);
       }
 
-      // Generate sequential token number
       const { count } = await supabase
         .from('tickets')
         .select('*', { count: 'exact', head: true })
@@ -282,7 +282,6 @@ export default function DoctorBookingDirectoryPage() {
       const nextNum = (count || 0) + 1;
       const tokenNumber = `T-${String(nextNum).padStart(3, '0')}`;
 
-      // Insert new ticket
       const { data: ticketData, error: ticketError } = await supabase
         .from('tickets')
         .insert([
@@ -467,7 +466,7 @@ export default function DoctorBookingDirectoryPage() {
             </div>
           </div>
 
-          {/* Search Box (Only on Directory tab) */}
+          {/* Search Box */}
           {activeTab === 'DIRECTORY' && (
             <div className="mt-6 relative max-w-2xl">
               <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-slate-400">
@@ -900,5 +899,17 @@ export default function DoctorBookingDirectoryPage() {
       )}
 
     </div>
+  );
+}
+
+export default function DoctorBookingDirectoryPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin" />
+      </div>
+    }>
+      <DoctorBookingDirectoryContent />
+    </Suspense>
   );
 }
