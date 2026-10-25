@@ -23,7 +23,9 @@ import {
   Volume2,
   Building2,
   IndianRupee,
-  LogOut
+  LogOut,
+  Phone,
+  FileText
 } from 'lucide-react';
 import { Department, Doctor } from '@/lib/types';
 
@@ -45,6 +47,7 @@ interface QueueTicket {
   priority: 'emergency' | 'senior' | 'normal';
   notes?: string;
   created_at: string;
+  called_at?: string;
   departments?: {
     name: string;
     code: string;
@@ -56,7 +59,6 @@ export default function ReceptionDeskPage() {
   const urlDoctorId = searchParams.get('doctor_id');
   const router = useRouter();
   const pathname = usePathname();
-
 
   const [departments, setDepartments] = useState<Department[]>([]);
   const [doctors, setDoctors] = useState<ExtendedDoctor[]>([]);
@@ -315,7 +317,6 @@ export default function ReceptionDeskPage() {
 
     try {
       const selectedDept = departments.find((d) => d.id === currentDoctor.department_id);
-      // For solo clinic, use 'T' or clinic prefix if preferred; otherwise use department code
       const prefix = isSoloClinicMode ? 'T' : (selectedDept?.code || 'OPD');
 
       const today = new Date().toISOString().split('T')[0];
@@ -330,6 +331,10 @@ export default function ReceptionDeskPage() {
       const nextSequence = (count || 0) + 1;
       const tokenNumber = `${prefix}-${String(nextSequence).padStart(3, '0')}`;
 
+      // Save note cleanly or store null if receptionist left it blank
+      const trimmedNote = notes.trim();
+      const finalNotes = trimmedNote ? `[${paymentMode}] ${trimmedNote}` : null;
+
       const { data: newTicket, error: insertError } = await supabase
         .from('tickets')
         .insert([
@@ -341,7 +346,7 @@ export default function ReceptionDeskPage() {
             doctor_id: currentDoctor.id,
             status: 'waiting',
             priority: priority,
-            notes: notes ? `[${paymentMode}] ${notes}` : `[${paymentMode} Counter Walk-In]`,
+            notes: finalNotes,
           },
         ])
         .select('*, departments(name, code)')
@@ -459,11 +464,11 @@ export default function ReceptionDeskPage() {
                 <Stethoscope className="w-4 h-4 text-slate-500 ml-1.5" />
                 <select
                   value={selectedDoctorId}
-                  onChange={(e) => {    const newId = e.target.value;    
+                  onChange={(e) => {
+                    const newId = e.target.value;    
                     setSelectedDoctorId(newId);    
                     router.push(`${pathname}?doctor_id=${newId}`);
-                  }
-                }
+                  }}
                   className="bg-transparent text-slate-900 text-xs font-bold rounded-lg pr-2 py-1 focus:outline-hidden"
                 >
                   {doctors.map((doc) => (
@@ -535,7 +540,7 @@ export default function ReceptionDeskPage() {
 
       {/* Main Control Panel */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 w-full flex-grow space-y-6">
-        
+
         {/* Alerts */}
         {errorMsg && (
           <div className="p-4 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm font-semibold flex items-center justify-between">
@@ -559,7 +564,7 @@ export default function ReceptionDeskPage() {
 
         {/* TOP ROW: Large Action Controller & Active Room */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          
+
           {/* Active Cabin Consultation Card */}
           <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-200 p-6 shadow-sm flex flex-col justify-between">
             <div>
@@ -586,34 +591,93 @@ export default function ReceptionDeskPage() {
               </div>
 
               {currentPatient ? (
-                <div className="py-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-                  <div>
-                    <div className="flex items-center gap-3">
-                      <span className="text-5xl font-black text-emerald-600 font-mono tracking-tight">
-                        {currentPatient.token_number}
-                      </span>
-                      {currentPatient.priority === 'emergency' && (
-                        <span className="bg-red-100 text-red-700 text-xs font-black px-2.5 py-1 rounded-md uppercase">
-                          Emergency
+                (() => {
+                  const rawNotes = (currentPatient.notes || '').trim();
+                  const upperNotes = rawNotes.toUpperCase();
+                  const hasUpi = upperNotes.includes('UPI');
+                  const hasCash = upperNotes.includes('CASH');
+                  const paymentLabel = hasUpi ? 'UPI' : hasCash ? 'Cash' : 'Paid';
+
+                  // Thorough clean: remove payment indicators, system tags, and any leftover brackets
+                  const cleanNote = rawNotes
+                    .replace(/\[\s*(UPI|CASH)\s*\]?/gi, '')
+                    .replace(/\[?\s*(Counter Walk-In|Online Self-Booked Token)\s*\]?/gi, '')
+                    .replace(/[\[\]]/g, '')
+                    .trim();
+
+                  return (
+                    <div className="py-4 space-y-3">
+                      {/* Token & Payment Header */}
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="flex items-center gap-3">
+                          <span className="text-5xl font-black text-emerald-600 font-mono tracking-tight">
+                            {currentPatient.token_number}
+                          </span>
+                          {currentPatient.priority === 'emergency' && (
+                            <span className="bg-rose-100 text-rose-700 text-xs font-black px-2.5 py-1 rounded-md uppercase tracking-wider border border-rose-200">
+                              Emergency
+                            </span>
+                          )}
+                          {currentPatient.priority === 'senior' && (
+                            <span className="bg-amber-100 text-amber-800 text-xs font-black px-2.5 py-1 rounded-md uppercase tracking-wider border border-amber-200">
+                              Senior Citizen
+                            </span>
+                          )}
+                        </div>
+
+                        {/* Single Rupee Payment Badge */}
+                        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-bold bg-slate-100 text-slate-700 border border-slate-200/80">
+                          <IndianRupee className="w-3.5 h-3.5 text-slate-500" />
+                          <span className="font-extrabold text-slate-900">{consultationFee}</span>
+                          <span className="text-slate-300">·</span>
+                          <span className="text-emerald-700 font-extrabold">{paymentLabel}</span>
                         </span>
-                      )}
-                      {currentPatient.priority === 'senior' && (
-                        <span className="bg-amber-100 text-amber-800 text-xs font-black px-2.5 py-1 rounded-md uppercase">
-                          Senior
-                        </span>
-                      )}
+                      </div>
+
+                      {/* Patient Name & Metadata */}
+                      <div>
+                        <h3 className="text-2xl font-black text-slate-900 tracking-tight">
+                          {currentPatient.patient_name}
+                        </h3>
+
+                        {/* Metadata Row: Phone and Timestamp */}
+                        <div className="flex flex-wrap items-center gap-3 text-xs mt-1.5">
+                          <span className="flex items-center gap-1.5">
+                            <Phone className="w-3.5 h-3.5 text-slate-400" />
+                            <span className="font-semibold text-slate-900">
+                              {currentPatient.phone_number || 'No phone recorded'}
+                            </span>
+                          </span>
+                          
+                          <span className="text-slate-300">•</span>
+                          
+                          <span className="flex items-center gap-1.5">
+                            <Clock className="w-3.5 h-3.5 text-slate-400" />
+                            <span className="text-slate-500 font-medium">Called</span>
+                            <span className="font-semibold text-slate-900">
+                              {currentPatient.called_at
+                                ? new Date(currentPatient.called_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                                : new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </span>
+                          </span>
+                        </div>
+
+                        {/* Note Row: Completely hidden when no notes exist */}
+                        {cleanNote.length > 0 && (
+                          <div className="flex items-center gap-1.5 text-xs mt-1.5">
+                            <FileText className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                            <span className="text-slate-500 font-medium">Note:</span>
+                            <span className="font-semibold text-slate-900">
+                              {cleanNote}
+                            </span>
+                          </div>
+                        )}
+                      </div>
                     </div>
-                    <h3 className="text-xl font-bold text-slate-900 mt-2">{currentPatient.patient_name}</h3>
-                    <p className="text-xs text-slate-500">{currentPatient.phone_number || 'Walk-in without phone'}</p>
-                    {currentPatient.notes && (
-                      <p className="text-xs text-slate-600 bg-slate-50 p-2 rounded-lg border border-slate-200 mt-2">
-                        {currentPatient.notes}
-                      </p>
-                    )}
-                  </div>
-                </div>
+                  );
+                })()
               ) : (
-                <div className="py-10 text-center text-slate-400">
+                <div className="py-12 text-center text-slate-400">
                   <p className="text-base font-bold text-slate-700">No Patient Inside Cabin</p>
                   <p className="text-xs text-slate-400 mt-1">Tap below to call the next patient from the waiting queue.</p>
                 </div>
@@ -769,13 +833,35 @@ export default function ReceptionDeskPage() {
                           </span>
                         )}
                       </td>
-                      <td className="px-6 py-4 text-xs text-slate-500 max-w-xs truncate">
-                        {t.notes || '—'}
+                      <td className="px-6 py-4 text-xs max-w-xs">
+                        {(() => {
+                          const raw = (t.notes || '').trim();
+                          const isUpi = raw.toUpperCase().includes('UPI');
+                          const isCash = raw.toUpperCase().includes('CASH');
+                          const clean = raw
+                            .replace(/\[\s*(UPI|CASH)\s*\]?/gi, '')
+                            .replace(/\[?\s*(Counter Walk-In|Online Self-Booked Token)\s*\]?/gi, '')
+                            .replace(/[\[\]]/g, '')
+                            .trim();
+
+                          return (
+                            <div className="flex items-center gap-2 truncate">
+                              {(isCash || isUpi) && (
+                                <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-600 border border-slate-200 shrink-0">
+                                  {isUpi ? 'UPI' : 'Cash'}
+                                </span>
+                              )}
+                              <span className="text-slate-700 font-medium truncate">
+                                {clean || (isCash || isUpi ? '' : '—')}
+                              </span>
+                            </div>
+                          );
+                        })()}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-right">
                         <button
                           onClick={() => setSelectedTicketForPrint(t)}
-                          className="text-slate-400 hover:text-blue-600 p-2 rounded-lg hover:bg-blue-50 transition-colors"
+                          className="text-slate-400 hover:text-blue-600 p-2 rounded-lg hover:bg-blue-50 transition-colors cursor-pointer"
                           title="Print Token Slip"
                         >
                           <Printer className="w-4 h-4" />
@@ -806,7 +892,7 @@ export default function ReceptionDeskPage() {
               </div>
               <button 
                 onClick={() => setShowWalkinModal(false)}
-                className="text-slate-400 hover:text-slate-600 p-1"
+                className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -888,7 +974,7 @@ export default function ReceptionDeskPage() {
                 <button
                   type="button"
                   onClick={() => setShowWalkinModal(false)}
-                  className="px-4 py-2.5 rounded-xl border border-slate-300 text-slate-700 text-xs font-bold hover:bg-slate-50"
+                  className="px-4 py-2.5 rounded-xl border border-slate-300 text-slate-700 text-xs font-bold hover:bg-slate-50 cursor-pointer"
                 >
                   Cancel
                 </button>
@@ -931,13 +1017,13 @@ export default function ReceptionDeskPage() {
             <div className="flex gap-2">
               <button
                 onClick={() => setSelectedTicketForPrint(null)}
-                className="flex-1 py-2 text-xs font-bold text-slate-600 border border-slate-300 rounded-xl hover:bg-slate-50"
+                className="flex-1 py-2 text-xs font-bold text-slate-600 border border-slate-300 rounded-xl hover:bg-slate-50 cursor-pointer"
               >
                 Close
               </button>
               <button
                 onClick={() => window.print()}
-                className="flex-1 py-2 text-xs font-bold text-white bg-blue-600 rounded-xl hover:bg-blue-700 flex items-center justify-center gap-1.5"
+                className="flex-1 py-2 text-xs font-bold text-white bg-blue-600 rounded-xl hover:bg-blue-700 flex items-center justify-center gap-1.5 cursor-pointer"
               >
                 <Printer className="w-3.5 h-3.5" />
                 <span>Print</span>
@@ -955,7 +1041,7 @@ export default function ReceptionDeskPage() {
               <h3 className="text-base font-black text-slate-900">Set OPD Schedule</h3>
               <button 
                 onClick={() => setShowTimingModal(false)} 
-                className="text-slate-400 hover:text-slate-600 p-1"
+                className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -1009,14 +1095,14 @@ export default function ReceptionDeskPage() {
                 <button
                   type="button"
                   onClick={() => setShowTimingModal(false)}
-                  className="px-3 py-2 rounded-xl border border-slate-200 text-xs font-bold text-slate-600 hover:bg-slate-50"
+                  className="px-3 py-2 rounded-xl border border-slate-200 text-xs font-bold text-slate-600 hover:bg-slate-50 cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={actionLoading}
-                  className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-xs font-bold text-white shadow-md disabled:opacity-50"
+                  className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-xs font-bold text-white shadow-md disabled:opacity-50 cursor-pointer"
                 >
                   {actionLoading ? 'Saving...' : 'Save Timing'}
                 </button>
