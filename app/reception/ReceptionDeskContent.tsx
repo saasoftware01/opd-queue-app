@@ -432,14 +432,7 @@ export default function ReceptionDeskPage() {
       <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-xs">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-20 flex items-center justify-between">
           <div className="flex items-center space-x-3">
-            <Link 
-              href="/" 
-              className="p-2.5 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-100 transition-colors flex items-center gap-1.5 text-xs font-bold"
-            >
-              <ArrowLeft className="w-4 h-4" />
-              <span>Portal</span>
-            </Link>
-            <div className="w-px h-6 bg-slate-200"></div>
+            
             <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center text-white shadow-md">
               {isSoloClinicMode ? <Building2 className="w-5 h-5" /> : <Users className="w-5 h-5" />}
             </div>
