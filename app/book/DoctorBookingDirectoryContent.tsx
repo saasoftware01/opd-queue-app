@@ -19,8 +19,51 @@ import {
   ArrowRight,
   Printer,
   Users,
-  Compass
+  Compass,
+  Volume2
 } from 'lucide-react';
+
+interface ClinicDirectoryRecord {
+  id: string;
+  name: string;
+  booking_fee: number | string | null;
+}
+
+interface DepartmentDirectoryRecord {
+  id: string;
+  name: string;
+}
+
+interface DoctorDirectoryRecord {
+  id: string;
+  name: string | null;
+  room_number: string | null;
+  opd_shift: string | null;
+  opd_timing: string | null;
+  clinic_id: string | null;
+  clinic_name: string | null;
+  department_id: string | null;
+  opd_status?: string | null;
+  broadcast_message?: string | null;
+}
+
+interface QueueMetricTicket {
+  doctor_id: string | null;
+  status: string;
+  token_number: string | null;
+}
+
+interface TrackedDoctorDetails {
+  name?: string | null;
+  room_number?: string | null;
+  clinic_name?: string | null;
+}
+
+interface TrackedDoctorStatus {
+  id: string;
+  opd_status?: string | null;
+  broadcast_message?: string | null;
+}
 
 interface DoctorDirectoryItem {
   id: string;
@@ -35,6 +78,8 @@ interface DoctorDirectoryItem {
   department_name: string;
   waiting_count?: number;
   current_token?: string | null;
+  opd_status?: string;
+  broadcast_message?: string | null;
 }
 
 interface ConfirmedTicket {
@@ -48,6 +93,15 @@ interface ConfirmedTicket {
   booking_amount: number;
   status: string;
   created_at?: string;
+  doctor_id?: string;
+}
+
+function getErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'object' && error !== null && 'message' in error && typeof error.message === 'string') {
+    return error.message;
+  }
+  return fallback;
 }
 
 function DoctorBookingDirectoryContent() {
@@ -73,6 +127,7 @@ function DoctorBookingDirectoryContent() {
   
   // Confirmed slip / Active tracked ticket
   const [confirmedTicket, setConfirmedTicket] = useState<ConfirmedTicket | null>(null);
+  const [trackedDoctor, setTrackedDoctor] = useState<TrackedDoctorStatus | null>(null);
   const [cancelLoading, setCancelLoading] = useState(false);
 
   // Live queue tracking counters
@@ -104,10 +159,10 @@ function DoctorBookingDirectoryContent() {
             .gte('created_at', `${today}T00:00:00.000Z`)
         ]);
 
-        const docData = docRes.status === 'fulfilled' && docRes.value.data ? docRes.value.data : [];
-        const clinicsData = clinicsRes.status === 'fulfilled' && clinicsRes.value.data ? clinicsRes.value.data : [];
-        const deptsData = deptsRes.status === 'fulfilled' && deptsRes.value.data ? deptsRes.value.data : [];
-        const todayTickets = ticketsRes.status === 'fulfilled' && ticketsRes.value.data ? ticketsRes.value.data : [];
+        const docData: DoctorDirectoryRecord[] = docRes.status === 'fulfilled' && docRes.value.data ? docRes.value.data : [];
+        const clinicsData: ClinicDirectoryRecord[] = clinicsRes.status === 'fulfilled' && clinicsRes.value.data ? clinicsRes.value.data : [];
+        const deptsData: DepartmentDirectoryRecord[] = deptsRes.status === 'fulfilled' && deptsRes.value.data ? deptsRes.value.data : [];
+        const todayTickets: QueueMetricTicket[] = ticketsRes.status === 'fulfilled' && ticketsRes.value.data ? ticketsRes.value.data : [];
 
         if (!isMounted) return;
 
@@ -117,16 +172,16 @@ function DoctorBookingDirectoryContent() {
           return;
         }
 
-        const clinicMap = new Map(clinicsData.map((c: any) => [c.id, c]));
-        const deptMap = new Map(deptsData.map((d: any) => [d.id, d.name]));
+        const clinicMap = new Map(clinicsData.map((clinic): [string, ClinicDirectoryRecord] => [clinic.id, clinic]));
+        const deptMap = new Map(deptsData.map((department): [string, string] => [department.id, department.name]));
 
-        const formatted: DoctorDirectoryItem[] = docData.map((doc: any) => {
+        const formatted: DoctorDirectoryItem[] = docData.map(doc => {
           const clinic = doc.clinic_id ? clinicMap.get(doc.clinic_id) : null;
           const deptName = doc.department_id ? deptMap.get(doc.department_id) : null;
 
-          const docTickets = todayTickets.filter((t: any) => t.doctor_id === doc.id);
-          const waitingCount = docTickets.filter((t: any) => t.status === 'waiting').length;
-          const activeConsultation = docTickets.find((t: any) => t.status === 'in-consultation');
+          const docTickets = todayTickets.filter(ticket => ticket.doctor_id === doc.id);
+          const waitingCount = docTickets.filter(ticket => ticket.status === 'waiting').length;
+          const activeConsultation = docTickets.find(ticket => ticket.status === 'in-consultation');
 
           return {
             id: doc.id,
@@ -141,6 +196,8 @@ function DoctorBookingDirectoryContent() {
             department_name: deptName || 'General OPD',
             waiting_count: waitingCount,
             current_token: activeConsultation?.token_number || null,
+            opd_status: doc.opd_status || 'ACTIVE',
+            broadcast_message: doc.broadcast_message || null,
           };
         });
 
@@ -150,7 +207,7 @@ function DoctorBookingDirectoryContent() {
           const matched = formatted.find(d => d.id === urlDoctorId);
           if (matched) setSelectedDoctor(matched);
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
         console.error('Failed to load doctor directory:', err);
         if (isMounted) setDoctors([]);
       } finally {
@@ -166,10 +223,52 @@ function DoctorBookingDirectoryContent() {
   }, [urlDoctorId, urlClinicId]);
 
   // 2. Realtime Live Queue Tracker for the confirmed ticket
-  useEffect(() => {
-    if (!confirmedTicket) return;
+  const confirmedTicketId = confirmedTicket?.id;
+  const trackedDoctorId = confirmedTicket?.doctor_id;
 
-    const activeTicketId = confirmedTicket.id;
+  useEffect(() => {
+    if (!trackedDoctorId) return;
+
+    let isActive = true;
+
+    async function loadTrackedDoctor() {
+      const { data, error } = await supabase
+        .from('doctors')
+        .select('id, opd_status, broadcast_message')
+        .eq('id', trackedDoctorId)
+        .maybeSingle();
+
+      if (error) {
+        console.error('Doctor status sync error:', error);
+        return;
+      }
+
+      if (isActive && data) setTrackedDoctor(data);
+    }
+
+    const channel = supabase
+      .channel(`tracked-doctor-${trackedDoctorId}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'doctors', filter: `id=eq.${trackedDoctorId}` },
+        () => {
+          void loadTrackedDoctor();
+        }
+      )
+      .subscribe();
+
+    void loadTrackedDoctor();
+
+    return () => {
+      isActive = false;
+      supabase.removeChannel(channel);
+    };
+  }, [trackedDoctorId]);
+
+  useEffect(() => {
+    if (!confirmedTicketId) return;
+
+    const activeTicketId = confirmedTicketId;
 
     async function syncLiveQueuePosition() {
       try {
@@ -225,7 +324,7 @@ function DoctorBookingDirectoryContent() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [confirmedTicket?.id]);
+  }, [confirmedTicketId]);
 
   // 3. Filter doctors by Search Query or Clinic Parameter
   const filteredDoctors = useMemo(() => {
@@ -312,12 +411,13 @@ function DoctorBookingDirectoryContent() {
         room_number: selectedDoctor.room_number,
         booking_amount: selectedDoctor.booking_fee,
         status: ticketData.status,
+        doctor_id: selectedDoctor.id,
       });
 
       setSelectedDoctor(null);
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Booking submission failed:', err);
-      setErrorMsg(err.message || 'Booking failed. Please try again.');
+      setErrorMsg(getErrorMessage(err, 'Booking failed. Please try again.'));
     } finally {
       setSubmitting(false);
     }
@@ -341,6 +441,7 @@ function DoctorBookingDirectoryContent() {
         .from('tickets')
         .select(`
           id,
+          doctor_id,
           token_number,
           patient_name,
           phone_number,
@@ -364,7 +465,7 @@ function DoctorBookingDirectoryContent() {
         throw new Error('No active token found for this mobile number today.');
       }
 
-      const docInfo: any = ticket.doctors;
+      const docInfo = ticket.doctors as TrackedDoctorDetails | null;
 
       setConfirmedTicket({
         id: ticket.id,
@@ -377,10 +478,11 @@ function DoctorBookingDirectoryContent() {
         booking_amount: 0,
         status: ticket.status,
         created_at: ticket.created_at,
+        doctor_id: ticket.doctor_id,
       });
 
-    } catch (err: any) {
-      setTrackerError(err.message || 'Unable to track token.');
+    } catch (err: unknown) {
+      setTrackerError(getErrorMessage(err, 'Unable to track token.'));
     } finally {
       setTrackerLoading(false);
     }
@@ -409,8 +511,8 @@ function DoctorBookingDirectoryContent() {
       setPatientName('');
       setPhone('');
       alert('Your consultation token has been cancelled successfully.');
-    } catch (err: any) {
-      alert(err.message || 'Unable to cancel token. Please contact the counter.');
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, 'Unable to cancel token. Please contact the counter.'));
     } finally {
       setCancelLoading(false);
     }
@@ -518,6 +620,12 @@ function DoctorBookingDirectoryContent() {
                   ? `Proceed inside ${confirmedTicket.room_number}`
                   : 'Live updates active · Keep this screen open'}
               </p>
+              {trackedDoctor && trackedDoctor.id === confirmedTicket.doctor_id && trackedDoctor.opd_status === 'PAUSED' && (
+                <div className="mt-4 p-3 bg-amber-500 text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-sm animate-pulse text-left">
+                  <Volume2 className="w-4 h-4 shrink-0" />
+                  <span>Notice: {trackedDoctor.broadcast_message || 'Doctor is temporarily delayed.'}</span>
+                </div>
+              )}
             </div>
 
             <div className="p-6 sm:p-8 space-y-6">
@@ -657,7 +765,7 @@ function DoctorBookingDirectoryContent() {
               <div className="w-12 h-12 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center mx-auto mb-3">
                 <Compass className="w-6 h-6" />
               </div>
-              <h2 className="text-lg font-black text-slate-900">Track Today's Token</h2>
+              <h2 className="text-lg font-black text-slate-900">Track Today&apos;s Token</h2>
               <p className="text-xs text-slate-500 mt-1">
                 Enter the mobile number you used while booking to check your live queue status.
               </p>
@@ -758,6 +866,13 @@ function DoctorBookingDirectoryContent() {
                         <Clock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                         <span>{doc.opd_timing} ({doc.opd_shift})</span>
                       </div>
+
+                      {doc.opd_status === 'PAUSED' && (
+                        <div className="mt-3 p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-xs font-bold text-amber-800 flex items-center gap-2">
+                          <span className="w-2 h-2 rounded-full bg-amber-500 animate-ping"></span>
+                          <span>OPD Paused: {doc.broadcast_message || 'Doctor is temporarily delayed.'}</span>
+                        </div>
+                      )}
 
                       {/* Live Queue Pulse Indicator */}
                       <div className="mt-3.5 py-2 px-3 rounded-xl bg-slate-50 border border-slate-100 flex items-center justify-between text-xs">
