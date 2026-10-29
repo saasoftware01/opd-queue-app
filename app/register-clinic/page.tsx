@@ -431,6 +431,13 @@ export default function RegisterClinicPage() {
             >
               Log in here
             </Link>
+            <span className="mx-2 text-slate-300">|</span>
+            <Link
+              href="/terms-and-conditions"
+              className="font-bold text-blue-600 hover:underline"
+            >
+              Terms &amp; Conditions
+            </Link>
           </div>
         </div>
       </div>

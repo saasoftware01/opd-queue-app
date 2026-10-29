@@ -472,14 +472,14 @@ export default function ReceptionDeskPage() {
     <div className="min-h-screen bg-slate-100 flex flex-col justify-between">
       {/* Top Header */}
       <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-xs">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-20 flex items-center justify-between">
-          <div className="flex items-center space-x-3">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 min-h-20 py-3 flex flex-col gap-3 sm:h-20 sm:flex-row sm:items-center sm:justify-between sm:py-0">
+          <div className="flex min-w-0 items-center space-x-3">
             
             <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center text-white shadow-md">
               {isSoloClinicMode ? <Building2 className="w-5 h-5" /> : <Users className="w-5 h-5" />}
             </div>
-            <div>
-              <h1 className="text-lg font-black text-slate-900 tracking-tight">
+            <div className="min-w-0">
+              <h1 className="truncate text-lg font-black text-slate-900 tracking-tight">
                 {currentDoctor?.clinic_name 
                   ? currentDoctor.clinic_name 
                   : isSoloClinicMode 
@@ -492,7 +492,7 @@ export default function ReceptionDeskPage() {
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             {/* Show Dropdown only if in Multi-Doctor Hospital mode */}
             {!isSoloClinicMode && (
               <div className="flex items-center space-x-2 bg-slate-50 p-1.5 rounded-xl border border-slate-300">

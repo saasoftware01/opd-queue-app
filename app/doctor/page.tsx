@@ -256,8 +256,8 @@ export default function DoctorDashboardPage() {
     <div className="min-h-screen bg-slate-50 flex flex-col justify-between">
       {/* Header */}
       <header className="bg-white border-b border-slate-200 sticky top-0 z-20 shadow-xs">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-20 flex items-center justify-between">
-          <div className="flex items-center space-x-4">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 min-h-20 py-3 flex flex-col gap-3 sm:h-20 sm:flex-row sm:items-center sm:justify-between sm:py-0">
+          <div className="flex min-w-0 items-center space-x-4">
             <Link 
               href="/" 
               className="p-2.5 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-100 transition-colors flex items-center gap-2 text-sm font-semibold"
@@ -269,14 +269,14 @@ export default function DoctorDashboardPage() {
               <div className="w-10 h-10 bg-emerald-600 rounded-xl flex items-center justify-center text-white shadow-md">
                 <Stethoscope className="w-5 h-5" />
               </div>
-              <div>
+              <div className="min-w-0">
                 <h1 className="text-lg font-bold text-slate-900">Doctor Consultation Room</h1>
                 <p className="text-xs text-slate-500 font-medium">Manage OPD queue & patient flow</p>
               </div>
             </div>
           </div>
 
-          <div className="flex items-center space-x-3">
+          <div className="flex items-center justify-between space-x-3 sm:justify-end">
             <label className="text-xs font-bold text-slate-600 uppercase tracking-wider hidden sm:block">
               Select Doctor:
             </label>
@@ -566,6 +566,13 @@ export default function DoctorDashboardPage() {
       <footer className="bg-white border-t border-slate-200 py-4">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center text-xs text-slate-500 font-medium">
           MediQueue OPD Consultation &bull; Doctor Portal
+          <span className="mx-2 text-slate-300">|</span>
+          <Link
+            href="/terms-and-conditions"
+            className="text-blue-600 hover:text-blue-700 hover:underline"
+          >
+            Terms &amp; Conditions
+          </Link>
         </div>
       </footer>
     </div>
