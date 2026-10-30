@@ -60,8 +60,19 @@ create policy "Allow public read access on tickets" on public.tickets for select
 create policy "Allow public insert/update on tickets" on public.tickets for all using (true);
 
 -- 7. Enable Supabase Realtime for live updates on queue screens
-alter publication supabase_realtime add table public.tickets;
-alter publication supabase_realtime add table public.doctors;
+do $$
+begin
+  alter publication supabase_realtime add table public.tickets;
+exception
+  when duplicate_object then null;
+end $$;
+
+do $$
+begin
+  alter publication supabase_realtime add table public.doctors;
+exception
+  when duplicate_object then null;
+end $$;
 
 -- 8. Seed Sample Data (Departments & Doctors)
 insert into public.departments (name, code, description) values

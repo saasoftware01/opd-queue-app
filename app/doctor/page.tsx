@@ -110,18 +110,33 @@ export default function DoctorDashboardPage() {
   useEffect(() => {
     if (!currentDoctor) return;
 
+    let isActive = true;
+    const departmentId = currentDoctor.department_id;
+    const doctorId = currentDoctor.id;
     const channel = supabase
-      .channel('doctor-queue-changes')
+      .channel(`doctor-queue-changes-${departmentId}`)
       .on(
         'postgres_changes',
-        { event: '*', schema: 'public', table: 'tickets' },
+        {
+          event: '*',
+          schema: 'public',
+          table: 'tickets',
+          filter: `department_id=eq.${departmentId}`,
+        },
         () => {
-          fetchQueue(currentDoctor.department_id, currentDoctor.id);
+          if (isActive) {
+            void fetchQueue(departmentId, doctorId);
+          }
         }
       )
-      .subscribe();
+      .subscribe((status) => {
+        if (status === 'CHANNEL_ERROR' && isActive) {
+          setErrorMsg('Queue updates are temporarily paused. Please refresh to see the latest status.');
+        }
+      });
 
     return () => {
+      isActive = false;
       supabase.removeChannel(channel);
     };
   }, [currentDoctor]);
