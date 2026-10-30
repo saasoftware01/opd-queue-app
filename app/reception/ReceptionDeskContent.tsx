@@ -34,6 +34,8 @@ interface ExtendedDoctor extends Doctor {
   consultation_fee?: number;
   opd_timing?: string;
   opd_shift?: string;
+  broadcast_message?: string | null;
+  opd_status?: 'LIVE' | 'PAUSED';
 }
 
 interface QueueTicket {
@@ -80,8 +82,11 @@ export default function ReceptionDeskPage() {
   const [errorMsg, setErrorMsg] = useState<string>('');
   const [successMsg, setSuccessMsg] = useState<string>('');
 
-  // Emergency Broadcast State
-  const [isOpdPaused, setIsOpdPaused] = useState<boolean>(false);
+    // Emergency Broadcast State
+    const isOpdPaused = currentDoctor?.opd_status === 'PAUSED';
+  // Broadcast Pause Modal State
+  const [showPauseModal, setShowPauseModal] = useState<boolean>(false);
+  const [broadcastInput, setBroadcastInput] = useState<string>('');
 
   // Walk-in Registration Modal States
   const [showWalkinModal, setShowWalkinModal] = useState<boolean>(false);
@@ -361,14 +366,51 @@ export default function ReceptionDeskPage() {
     }
   };
 
-  // ACTION 5: Toggle Pause / Emergency Broadcast
-  const handleTogglePause = () => {
-    const nextState = !isOpdPaused;
-    setIsOpdPaused(nextState);
-    if (nextState) {
-      setErrorMsg('OPD paused! Delay notice broadcasted to patient displays.');
+    // Trigger Pause Button: If live, open modal. If paused, instantly resume.
+  const handleTogglePauseClick = async () => {
+    if (!currentDoctor) return;
+    if (isOpdPaused) {
+      // INSTANT RESUME: Clear message and set to LIVE
+      await executePauseResume('LIVE', null);
     } else {
-      setSuccessMsg('OPD resumed. Queue operations active.');
+      // OPEN MODAL TO PAUSE WITH MESSAGE
+      setBroadcastInput(currentDoctor.broadcast_message || 'Doctor is temporarily delayed.');
+      setShowPauseModal(true);
+    }
+  };
+
+  // Execute Database Save for Pause/Resume
+  const executePauseResume = async (status: 'LIVE' | 'PAUSED', message: string | null) => {
+    if (!currentDoctor) return;
+    setActionLoading(true);
+    try {
+      const { error } = await supabase
+        .from('doctors')
+        .update({
+          opd_status: status,
+          broadcast_message: message,
+        })
+        .eq('id', currentDoctor.id);
+
+      if (error) throw error;
+
+      setCurrentDoctor(prev => prev ? { ...prev, opd_status: status, broadcast_message: message } : null);
+      setDoctors(prev => prev.map(doctor =>
+        doctor.id === currentDoctor.id
+          ? { ...doctor, opd_status: status, broadcast_message: message }
+          : doctor
+      ));
+      setShowPauseModal(false);
+
+      if (status === 'PAUSED') {
+        setErrorMsg('OPD paused! Custom broadcast notice active on patient screens.');
+      } else {
+        setSuccessMsg('OPD resumed. Queue operations active.');
+      }
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Failed to update OPD status');
+    } finally {
+      setActionLoading(false);
     }
   };
 
@@ -476,9 +518,9 @@ export default function ReceptionDeskPage() {
               <span className="text-[10px] underline ml-1 text-blue-500">Edit</span>
             </button>
 
-            {/* Emergency Broadcast / Pause OPD Button */}
+                        {/* Emergency Broadcast / Pause OPD Button */}
             <button
-              onClick={handleTogglePause}
+              onClick={handleTogglePauseClick}
               className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer ${
                 isOpdPaused
                   ? 'bg-amber-600 hover:bg-amber-700 text-white animate-pulse'
@@ -1014,7 +1056,7 @@ export default function ReceptionDeskPage() {
         </div>
       )}
 
-      {/* MODAL: Update Doctor OPD Timing */}
+            {/* MODAL: Update Doctor OPD Timing */}
       {showTimingModal && (
         <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-2xl border border-slate-200">
@@ -1089,6 +1131,74 @@ export default function ReceptionDeskPage() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: Custom Broadcast Message when Pausing OPD */}
+      {showPauseModal && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200">
+            <div className="flex justify-between items-center mb-4 pb-3 border-b border-slate-100">
+              <div>
+                <h3 className="text-lg font-black text-slate-900">Pause OPD & Broadcast Notice</h3>
+                <p className="text-xs text-slate-500">This message will show on patient booking & tracking screens.</p>
+              </div>
+              <button
+                onClick={() => setShowPauseModal(false)}
+                className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                  Quick Presets
+                </label>
+                <div className="flex flex-wrap gap-1.5 mb-3">
+                  {['Doctor delayed by 15 mins', 'In Surgery / Procedure', 'Lunch Break', 'Emergency Case inside Cabin'].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => setBroadcastInput(preset)}
+                      className="px-2.5 py-1 bg-slate-100 hover:bg-blue-50 hover:text-blue-600 rounded-lg text-[11px] font-semibold text-slate-700 border border-slate-200 transition-colors cursor-pointer"
+                    >
+                      {preset}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                  Custom Broadcast Message *
+                </label>
+                <textarea
+                  rows={3}
+                  value={broadcastInput}
+                  onChange={(e) => setBroadcastInput(e.target.value)}
+                  placeholder="Enter reason for delay..."
+                  className="w-full bg-slate-50 border border-slate-300 rounded-xl p-3 text-sm text-slate-900 focus:ring-2 focus:ring-amber-500 focus:outline-hidden"
+                />
+              </div>
+              <div className="flex items-center justify-end gap-3 pt-3">
+                <button
+                  type="button"
+                  onClick={() => setShowPauseModal(false)}
+                  className="px-4 py-2.5 rounded-xl border border-slate-300 text-slate-700 text-xs font-bold hover:bg-slate-50 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={actionLoading || !broadcastInput.trim()}
+                  onClick={() => executePauseResume('PAUSED', broadcastInput.trim())}
+                  className="px-5 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold shadow-md disabled:opacity-50 cursor-pointer"
+                >
+                  {actionLoading ? 'Pausing...' : 'Confirm & Pause OPD'}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}
