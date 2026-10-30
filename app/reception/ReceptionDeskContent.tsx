@@ -319,18 +319,6 @@ export default function ReceptionDeskPage() {
       const selectedDept = departments.find((d) => d.id === currentDoctor.department_id);
       const prefix = isSoloClinicMode ? 'T' : (selectedDept?.code || 'OPD');
 
-      const today = new Date().toISOString().split('T')[0];
-      const { count, error: countErr } = await supabase
-        .from('tickets')
-        .select('*', { count: 'exact', head: true })
-        .eq('department_id', currentDoctor.department_id)
-        .gte('created_at', `${today}T00:00:00.000Z`);
-
-      if (countErr) throw countErr;
-
-      const nextSequence = (count || 0) + 1;
-      const tokenNumber = `${prefix}-${String(nextSequence).padStart(3, '0')}`;
-
       // Save note cleanly or store null if receptionist left it blank
       const trimmedNote = notes.trim();
       const finalNotes = trimmedNote ? `[${paymentMode}] ${trimmedNote}` : null;
@@ -339,7 +327,7 @@ export default function ReceptionDeskPage() {
         .from('tickets')
         .insert([
           {
-            token_number: tokenNumber,
+            token_number: prefix,
             patient_name: patientName.trim(),
             phone_number: phoneNumber.trim() || null,
             department_id: currentDoctor.department_id,
@@ -354,7 +342,7 @@ export default function ReceptionDeskPage() {
 
       if (insertError) throw insertError;
 
-      setSuccessMsg(`Token ${tokenNumber} issued to ${patientName}`);
+      setSuccessMsg(`Token ${newTicket.token_number} issued to ${patientName}`);
       setSelectedTicketForPrint(newTicket as QueueTicket);
       setShowWalkinModal(false);
 

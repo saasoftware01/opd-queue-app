@@ -273,15 +273,6 @@ function DoctorBookingDirectoryContent() {
         throw new Error(`You already have an active Token (#${existingTicket.token_number}) in queue today.`);
       }
 
-      const { count } = await supabase
-        .from('tickets')
-        .select('*', { count: 'exact', head: true })
-        .eq('doctor_id', selectedDoctor.id)
-        .gte('created_at', `${today}T00:00:00.000Z`);
-
-      const nextNum = (count || 0) + 1;
-      const tokenNumber = `T-${String(nextNum).padStart(3, '0')}`;
-
       const { data: ticketData, error: ticketError } = await supabase
         .from('tickets')
         .insert([
@@ -289,7 +280,7 @@ function DoctorBookingDirectoryContent() {
             clinic_id: selectedDoctor.clinic_id || null,
             doctor_id: selectedDoctor.id,
             department_id: selectedDoctor.department_id,
-            token_number: tokenNumber,
+            token_number: 'T',
             patient_name: patientName.trim(),
             phone_number: cleanPhone,
             priority: 'normal',
