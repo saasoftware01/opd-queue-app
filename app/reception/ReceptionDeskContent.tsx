@@ -349,18 +349,6 @@ export default function ReceptionDeskPage() {
       const selectedDept = departments.find((d) => d.id === currentDoctor.department_id);
       const prefix = isSoloClinicMode ? 'T' : (selectedDept?.code || 'OPD');
 
-      const today = new Date().toISOString().split('T')[0];
-      const { count, error: countErr } = await supabase
-        .from('tickets')
-        .select('*', { count: 'exact', head: true })
-        .eq('department_id', currentDoctor.department_id)
-        .gte('created_at', `${today}T00:00:00.000Z`);
-
-      if (countErr) throw countErr;
-
-      const nextSequence = (count || 0) + 1;
-      const tokenNumber = `${prefix}-${String(nextSequence).padStart(3, '0')}`;
-
       // Save note cleanly or store null if receptionist left it blank
       const trimmedNote = notes.trim();
       const finalNotes = trimmedNote ? `[${paymentMode}] ${trimmedNote}` : null;
@@ -369,7 +357,7 @@ export default function ReceptionDeskPage() {
         .from('tickets')
         .insert([
           {
-            token_number: tokenNumber,
+            token_number: prefix,
             patient_name: patientName.trim(),
             phone_number: phoneNumber.trim() || null,
             patient_age: age,
@@ -386,7 +374,7 @@ export default function ReceptionDeskPage() {
 
       if (insertError) throw insertError;
 
-      setSuccessMsg(`Token ${tokenNumber} issued to ${patientName}`);
+      setSuccessMsg(`Token ${newTicket.token_number} issued to ${patientName}`);
       setSelectedTicketForPrint(newTicket as QueueTicket);
       setShowWalkinModal(false);
 
@@ -1301,41 +1289,6 @@ export default function ReceptionDeskPage() {
                   {actionLoading ? 'Pausing...' : 'Confirm & Pause OPD'}
                 </button>
               </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* MODAL: Confirm sign out */}
-      {showLogoutModal && (
-        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200">
-            <div className="flex flex-col items-center text-center">
-              <div className="w-10 h-10 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center">
-                <LogOut className="w-5 h-5" />
-              </div>
-              <div className="mt-4">
-                <h3 className="text-base font-bold text-slate-900">Ready to leave the reception desk?</h3>
-                <p className="text-xs leading-5 text-slate-500 mt-2">
-                  You can sign back in anytime to manage the patient queue.
-                </p>
-              </div>
-            </div>
-            <div className="flex justify-center gap-3 mt-6">
-              <button
-                type="button"
-                onClick={() => setShowLogoutModal(false)}
-                className="px-4 py-2.5 rounded-xl border border-slate-300 text-slate-700 text-xs font-bold hover:bg-slate-50 cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={confirmLogout}
-                className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-md cursor-pointer"
-              >
-                Yes, Log Out
-              </button>
             </div>
           </div>
         </div>
