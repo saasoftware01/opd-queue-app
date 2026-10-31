@@ -24,6 +24,8 @@ export interface Ticket {
   token_number: string;
   patient_name: string;
   phone_number?: string;
+  patient_age?: number;
+  patient_gender?: string;
   department_id: string;
   doctor_id?: string;
   status: TicketStatus;

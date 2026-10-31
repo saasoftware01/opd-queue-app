@@ -33,6 +33,8 @@ create table if not exists public.tickets (
   token_number text not null, -- e.g., 'GEN-001'
   patient_name text not null,
   phone_number text,
+  patient_age integer check (patient_age is null or patient_age between 0 and 120),
+  patient_gender text,
   department_id uuid references public.departments(id) on delete cascade not null,
   doctor_id uuid references public.doctors(id) on delete set null,
   status ticket_status default 'waiting' not null,
@@ -42,6 +44,13 @@ create table if not exists public.tickets (
   completed_at timestamp with time zone,
   created_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
+
+alter table public.tickets
+  add column if not exists patient_age integer
+  check (patient_age is null or patient_age between 0 and 120);
+
+alter table public.tickets
+  add column if not exists patient_gender text;
 
 -- 5. Enable Row Level Security (RLS)
 alter table public.departments enable row level security;

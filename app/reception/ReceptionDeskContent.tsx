@@ -43,6 +43,8 @@ interface QueueTicket {
   token_number: string;
   patient_name: string;
   phone_number: string;
+  patient_age?: number;
+  patient_gender?: string;
   department_id: string;
   doctor_id: string | null;
   status: 'waiting' | 'in-consultation' | 'completed' | 'skipped';
@@ -92,6 +94,8 @@ export default function ReceptionDeskPage() {
   const [showWalkinModal, setShowWalkinModal] = useState<boolean>(false);
   const [patientName, setPatientName] = useState('');
   const [phoneNumber, setPhoneNumber] = useState('');
+  const [patientAge, setPatientAge] = useState('');
+  const [patientGender, setPatientGender] = useState('');
   const [priority, setPriority] = useState<'normal' | 'senior' | 'emergency'>('normal');
   const [paymentMode, setPaymentMode] = useState<'CASH' | 'UPI'>('CASH');
   const [notes, setNotes] = useState('');
@@ -330,6 +334,11 @@ export default function ReceptionDeskPage() {
   const handleAddWalkin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!patientName.trim() || !currentDoctor) return;
+    const age = Number(patientAge);
+    if (!Number.isInteger(age) || age < 0 || age > 120 || !patientGender) {
+      setErrorMsg('Please enter a valid patient age and select a gender.');
+      return;
+    }
 
     setActionLoading(true);
     setErrorMsg('');
@@ -362,6 +371,8 @@ export default function ReceptionDeskPage() {
             token_number: tokenNumber,
             patient_name: patientName.trim(),
             phone_number: phoneNumber.trim() || null,
+            patient_age: age,
+            patient_gender: patientGender,
             department_id: currentDoctor.department_id,
             doctor_id: currentDoctor.id,
             status: 'waiting',
@@ -381,6 +392,8 @@ export default function ReceptionDeskPage() {
       // Reset form
       setPatientName('');
       setPhoneNumber('');
+      setPatientAge('');
+      setPatientGender('');
       setNotes('');
       setPriority('normal');
       setPaymentMode('CASH');
@@ -698,6 +711,18 @@ export default function ReceptionDeskPage() {
                               {currentPatient.phone_number || 'No phone recorded'}
                             </span>
                           </span>
+
+                          <span className="text-slate-300">•</span>
+
+                          <span className="font-semibold text-slate-900">
+                            Age: {currentPatient.patient_age ?? '—'}
+                          </span>
+
+                          <span className="text-slate-300">•</span>
+
+                          <span className="font-semibold capitalize text-slate-900">
+                            Gender: {currentPatient.patient_gender?.replaceAll('-', ' ') || '—'}
+                          </span>
                           
                           <span className="text-slate-300">•</span>
                           
@@ -809,7 +834,8 @@ export default function ReceptionDeskPage() {
 
             <div className="p-4 bg-slate-50 rounded-xl border border-slate-200 mt-6">
               <p className="text-xs text-slate-500 leading-relaxed">
-                Tokens and actions are synchronized across counter and doctor cabin screens via Supabase Realtime.
+                Call the next patient when the cabin is ready.
+                Mark each visit as completed after consultation.
               </p>
             </div>
           </div>
@@ -835,6 +861,8 @@ export default function ReceptionDeskPage() {
                   <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-500 uppercase">Pos</th>
                   <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-500 uppercase">Token</th>
                   <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-500 uppercase">Patient Name</th>
+                  <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-500 uppercase">Age</th>
+                  <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-500 uppercase">Gender</th>
                   <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-500 uppercase">Priority</th>
                   <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-500 uppercase">Notes / Tag</th>
                   <th className="px-6 py-3.5 text-right text-xs font-bold text-slate-500 uppercase">Slip</th>
@@ -843,13 +871,13 @@ export default function ReceptionDeskPage() {
               <tbody className="bg-white divide-y divide-slate-100">
                 {loading ? (
                   <tr>
-                    <td colSpan={6} className="py-12 text-center text-slate-400 text-sm">
+                    <td colSpan={8} className="py-12 text-center text-slate-400 text-sm">
                       Loading synchronized queue...
                     </td>
                   </tr>
                 ) : queueTickets.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="py-12 text-center text-slate-400 text-sm">
+                    <td colSpan={8} className="py-12 text-center text-slate-400 text-sm">
                       No patients waiting in queue. Click <span className="font-bold text-blue-600">"+ Add Walk-In"</span> to register an offline patient.
                     </td>
                   </tr>
@@ -865,6 +893,12 @@ export default function ReceptionDeskPage() {
                       <td className="px-6 py-4">
                         <div className="text-sm font-bold text-slate-900">{t.patient_name}</div>
                         <div className="text-xs text-slate-500">{t.phone_number || 'Offline / No Phone'}</div>
+                      </td>
+                      <td className="px-6 py-4 text-sm font-semibold text-slate-700">
+                        {t.patient_age ?? '—'}
+                      </td>
+                      <td className="px-6 py-4 text-sm font-semibold capitalize text-slate-700">
+                        {t.patient_gender?.replaceAll('-', ' ') || '—'}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
                         {t.priority === 'emergency' && (
@@ -974,6 +1008,41 @@ export default function ReceptionDeskPage() {
                   placeholder="10-digit mobile number"
                   className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:ring-2 focus:ring-blue-500 focus:outline-hidden"
                 />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                    Patient Age *
+                  </label>
+                  <input
+                    type="number"
+                    required
+                    min="0"
+                    max="120"
+                    value={patientAge}
+                    onChange={(e) => setPatientAge(e.target.value)}
+                    placeholder="Age"
+                    className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:ring-2 focus:ring-blue-500 focus:outline-hidden"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                    Gender *
+                  </label>
+                  <select
+                    required
+                    value={patientGender}
+                    onChange={(e) => setPatientGender(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2.5 text-sm text-slate-900 focus:ring-2 focus:ring-blue-500 focus:outline-hidden"
+                  >
+                    <option value="">Select</option>
+                    <option value="female">Female</option>
+                    <option value="male">Male</option>
+                    <option value="other">Other</option>
+                    <option value="prefer-not-to-say">Prefer not to say</option>
+                  </select>
+                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
