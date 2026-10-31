@@ -312,6 +312,12 @@ export default function LoginPage() {
             <span className="text-[11px] text-slate-600 font-medium">
               Encrypted session · Multi-tenant token isolation
             </span>
+            <Link
+              href="/terms-and-conditions"
+              className="mt-2 block text-[11px] font-semibold text-blue-600 hover:text-blue-700 hover:underline"
+            >
+              Terms &amp; Conditions
+            </Link>
           </div>
 
         </div>

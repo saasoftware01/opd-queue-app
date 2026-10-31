@@ -122,6 +122,8 @@ function DoctorBookingDirectoryContent() {
   // Form fields for new booking
   const [patientName, setPatientName] = useState('');
   const [phone, setPhone] = useState('');
+  const [patientAge, setPatientAge] = useState('');
+  const [patientGender, setPatientGender] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   
@@ -356,6 +358,13 @@ function DoctorBookingDirectoryContent() {
       if (cleanPhone.length < 10) {
         throw new Error('Please enter a valid 10-digit mobile number.');
       }
+      const age = Number(patientAge);
+      if (!Number.isInteger(age) || age < 0 || age > 120) {
+        throw new Error('Please enter a valid patient age between 0 and 120.');
+      }
+      if (!patientGender) {
+        throw new Error('Please select the patient gender.');
+      }
 
       const today = new Date().toISOString().split('T')[0];
 
@@ -382,6 +391,8 @@ function DoctorBookingDirectoryContent() {
             token_number: 'T',
             patient_name: patientName.trim(),
             phone_number: cleanPhone,
+            patient_age: age,
+            patient_gender: patientGender,
             priority: 'normal',
             status: 'waiting',
             notes: '[Online Self-Booked Token]',
@@ -446,7 +457,7 @@ function DoctorBookingDirectoryContent() {
         `)
         .eq('phone_number', cleanPhone)
         .gte('created_at', `${today}T00:00:00.000Z`)
-        .in('status', ['waiting', 'in-consultation', 'completed'])
+        .in('status', ['waiting', 'in-consultation', 'completed', 'skipped'])
         .order('created_at', { ascending: false })
         .limit(1)
         .maybeSingle();
@@ -586,7 +597,9 @@ function DoctorBookingDirectoryContent() {
             
             {/* Dynamic Status Header */}
             <div className={`p-6 text-white text-center transition-all ${
-              confirmedTicket.status === 'completed'
+              confirmedTicket.status === 'skipped'
+                ? 'bg-amber-600'
+                : confirmedTicket.status === 'completed'
                 ? 'bg-emerald-600'
                 : confirmedTicket.status === 'in-consultation'
                 ? 'bg-blue-600 animate-pulse'
@@ -596,7 +609,9 @@ function DoctorBookingDirectoryContent() {
             }`}>
               <CheckCircle2 className="w-12 h-12 mx-auto mb-2 text-white/90" />
               <h2 className="text-xl font-black tracking-tight">
-                {confirmedTicket.status === 'completed'
+                {confirmedTicket.status === 'skipped'
+                  ? 'Token Skipped'
+                  : confirmedTicket.status === 'completed'
                   ? 'Consultation Completed'
                   : confirmedTicket.status === 'in-consultation'
                   ? '🔔 It’s Your Turn! Please Enter Cabin'
@@ -605,7 +620,9 @@ function DoctorBookingDirectoryContent() {
                   : 'Token Confirmed & Queued'}
               </h2>
               <p className="text-xs text-white/80 mt-0.5">
-                {confirmedTicket.status === 'completed'
+                {confirmedTicket.status === 'skipped'
+                  ? 'Please visit the reception counter to reactivate your token.'
+                  : confirmedTicket.status === 'completed'
                   ? 'Thank you for visiting! Wishing you a speedy recovery.'
                   : confirmedTicket.status === 'in-consultation'
                   ? `Proceed inside ${confirmedTicket.room_number}`
@@ -632,7 +649,16 @@ function DoctorBookingDirectoryContent() {
               </div>
 
               {/* LIVE QUEUE OR COMPLETED SUMMARY */}
-              {confirmedTicket.status === 'completed' ? (
+              {confirmedTicket.status === 'skipped' ? (
+                <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-center space-y-2">
+                  <div className="text-xs font-bold text-amber-800 uppercase tracking-wide">
+                    Token Not Active
+                  </div>
+                  <p className="text-xs text-amber-700 leading-relaxed">
+                    Your token was skipped. Please ask the receptionist to reactivate it before continuing.
+                  </p>
+                </div>
+              ) : confirmedTicket.status === 'completed' ? (
                 <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-center space-y-2">
                   <div className="text-xs font-bold text-emerald-800 uppercase tracking-wide">
                     Visit Complete
@@ -694,13 +720,17 @@ function DoctorBookingDirectoryContent() {
                 <div className="flex justify-between items-center">
                   <span className="text-slate-400 font-medium">Status:</span>
                   <span className={`font-black uppercase text-xs ${
-                    confirmedTicket.status === 'completed' 
-                      ? 'text-emerald-600' 
-                      : confirmedTicket.status === 'in-consultation' 
-                      ? 'text-blue-600' 
+                    confirmedTicket.status === 'skipped'
+                      ? 'text-amber-600'
+                      : confirmedTicket.status === 'completed'
+                      ? 'text-emerald-600'
+                      : confirmedTicket.status === 'in-consultation'
+                      ? 'text-blue-600'
                       : 'text-amber-600'
                   }`}>
-                    {confirmedTicket.status === 'completed'
+                    {confirmedTicket.status === 'skipped'
+                      ? '⚠️ Token Skipped'
+                      : confirmedTicket.status === 'completed'
                       ? '✅ Completed'
                       : confirmedTicket.status === 'in-consultation'
                       ? '🟢 Consulting Now'
@@ -941,6 +971,41 @@ function DoctorBookingDirectoryContent() {
                     placeholder="Enter patient full name"
                     className="w-full bg-slate-50 border border-slate-300 rounded-xl pl-10 pr-4 py-2.5 text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-600 focus:outline-hidden"
                   />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                    Patient Age *
+                  </label>
+                  <input
+                    type="number"
+                    required
+                    min="0"
+                    max="120"
+                    value={patientAge}
+                    onChange={(e) => setPatientAge(e.target.value)}
+                    placeholder="Age"
+                    className="w-full bg-slate-50 border border-slate-300 rounded-xl px-4 py-2.5 text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-600 focus:outline-hidden"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                    Gender *
+                  </label>
+                  <select
+                    required
+                    value={patientGender}
+                    onChange={(e) => setPatientGender(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2.5 text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-600 focus:outline-hidden"
+                  >
+                    <option value="">Select</option>
+                    <option value="female">Female</option>
+                    <option value="male">Male</option>
+                    <option value="other">Other</option>
+                    <option value="prefer-not-to-say">Prefer not to say</option>
+                  </select>
                 </div>
               </div>
 

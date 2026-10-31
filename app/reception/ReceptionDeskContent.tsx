@@ -43,6 +43,8 @@ interface QueueTicket {
   token_number: string;
   patient_name: string;
   phone_number: string;
+  patient_age?: number;
+  patient_gender?: string;
   department_id: string;
   doctor_id: string | null;
   status: 'waiting' | 'in-consultation' | 'completed' | 'skipped';
@@ -76,6 +78,7 @@ export default function ReceptionDeskPage() {
   const [showTimingModal, setShowTimingModal] = useState<boolean>(false);
   const [newTimingInput, setNewTimingInput] = useState<string>('');
   const [newShiftInput, setNewShiftInput] = useState<string>('Morning');
+  const [showLogoutModal, setShowLogoutModal] = useState<boolean>(false);
 
   const [loading, setLoading] = useState<boolean>(true);
   const [actionLoading, setActionLoading] = useState<boolean>(false);
@@ -92,6 +95,8 @@ export default function ReceptionDeskPage() {
   const [showWalkinModal, setShowWalkinModal] = useState<boolean>(false);
   const [patientName, setPatientName] = useState('');
   const [phoneNumber, setPhoneNumber] = useState('');
+  const [patientAge, setPatientAge] = useState('');
+  const [patientGender, setPatientGender] = useState('');
   const [priority, setPriority] = useState<'normal' | 'senior' | 'emergency'>('normal');
   const [paymentMode, setPaymentMode] = useState<'CASH' | 'UPI'>('CASH');
   const [notes, setNotes] = useState('');
@@ -157,18 +162,33 @@ export default function ReceptionDeskPage() {
   useEffect(() => {
     if (!currentDoctor) return;
 
+    let isActive = true;
+    const departmentId = currentDoctor.department_id;
+    const doctorId = currentDoctor.id;
     const channel = supabase
-      .channel('reception-queue-sync')
+      .channel(`reception-queue-sync-${departmentId}`)
       .on(
         'postgres_changes',
-        { event: '*', schema: 'public', table: 'tickets' },
+        {
+          event: '*',
+          schema: 'public',
+          table: 'tickets',
+          filter: `department_id=eq.${departmentId}`,
+        },
         () => {
-          fetchDoctorQueue(currentDoctor.department_id, currentDoctor.id);
+          if (isActive) {
+            void fetchDoctorQueue(departmentId, doctorId);
+          }
         }
       )
-      .subscribe();
+      .subscribe((status) => {
+        if (status === 'CHANNEL_ERROR' && isActive) {
+          setErrorMsg('Queue updates are temporarily paused. Please refresh to see the latest status.');
+        }
+      });
 
     return () => {
+      isActive = false;
       supabase.removeChannel(channel);
     };
   }, [currentDoctor]);
@@ -315,6 +335,11 @@ export default function ReceptionDeskPage() {
   const handleAddWalkin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!patientName.trim() || !currentDoctor) return;
+    const age = Number(patientAge);
+    if (!Number.isInteger(age) || age < 0 || age > 120 || !patientGender) {
+      setErrorMsg('Please enter a valid patient age and select a gender.');
+      return;
+    }
 
     setActionLoading(true);
     setErrorMsg('');
@@ -335,6 +360,8 @@ export default function ReceptionDeskPage() {
             token_number: prefix,
             patient_name: patientName.trim(),
             phone_number: phoneNumber.trim() || null,
+            patient_age: age,
+            patient_gender: patientGender,
             department_id: currentDoctor.department_id,
             doctor_id: currentDoctor.id,
             status: 'waiting',
@@ -354,6 +381,8 @@ export default function ReceptionDeskPage() {
       // Reset form
       setPatientName('');
       setPhoneNumber('');
+      setPatientAge('');
+      setPatientGender('');
       setNotes('');
       setPriority('normal');
       setPaymentMode('CASH');
@@ -442,8 +471,14 @@ export default function ReceptionDeskPage() {
     }
   };
 
-  // ACTION 7: Sign out and redirect to login
+  // ACTION 7: Show sign-out confirmation
   const handleLogout = async () => {
+    setShowLogoutModal(true);
+  };
+
+  // ACTION 8: Sign out and redirect to login
+  const confirmLogout = async () => {
+    setShowLogoutModal(false);
     try {
       await supabase.auth.signOut();
       router.push('/login');
@@ -460,14 +495,14 @@ export default function ReceptionDeskPage() {
     <div className="min-h-screen bg-slate-100 flex flex-col justify-between">
       {/* Top Header */}
       <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-xs">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-20 flex items-center justify-between">
-          <div className="flex items-center space-x-3">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 min-h-20 py-3 flex flex-col gap-3 sm:h-20 sm:flex-row sm:items-center sm:justify-between sm:py-0">
+          <div className="flex min-w-0 items-center space-x-3">
             
             <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center text-white shadow-md">
               {isSoloClinicMode ? <Building2 className="w-5 h-5" /> : <Users className="w-5 h-5" />}
             </div>
-            <div>
-              <h1 className="text-lg font-black text-slate-900 tracking-tight">
+            <div className="min-w-0">
+              <h1 className="truncate text-lg font-black text-slate-900 tracking-tight">
                 {currentDoctor?.clinic_name 
                   ? currentDoctor.clinic_name 
                   : isSoloClinicMode 
@@ -480,7 +515,7 @@ export default function ReceptionDeskPage() {
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             {/* Show Dropdown only if in Multi-Doctor Hospital mode */}
             {!isSoloClinicMode && (
               <div className="flex items-center space-x-2 bg-slate-50 p-1.5 rounded-xl border border-slate-300">
@@ -543,7 +578,7 @@ export default function ReceptionDeskPage() {
             {/* Log Out Button */}
             <button
               onClick={handleLogout}
-              className="flex items-center space-x-1.5 bg-slate-100 hover:bg-rose-50 hover:text-rose-600 text-slate-600 border border-slate-200 hover:border-rose-200 px-3 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer"
+              className="flex items-center space-x-1.5 bg-slate-100 hover:bg-blue-50 hover:text-blue-600 text-slate-600 border border-slate-200 hover:border-blue-200 px-3 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer"
               title="Log Out of Clinic Session"
             >
               <LogOut className="w-4 h-4" />
@@ -671,6 +706,18 @@ export default function ReceptionDeskPage() {
                               {currentPatient.phone_number || 'No phone recorded'}
                             </span>
                           </span>
+
+                          <span className="text-slate-300">•</span>
+
+                          <span className="font-semibold text-slate-900">
+                            Age: {currentPatient.patient_age ?? '—'}
+                          </span>
+
+                          <span className="text-slate-300">•</span>
+
+                          <span className="font-semibold capitalize text-slate-900">
+                            Gender: {currentPatient.patient_gender?.replaceAll('-', ' ') || '—'}
+                          </span>
                           
                           <span className="text-slate-300">•</span>
                           
@@ -782,7 +829,8 @@ export default function ReceptionDeskPage() {
 
             <div className="p-4 bg-slate-50 rounded-xl border border-slate-200 mt-6">
               <p className="text-xs text-slate-500 leading-relaxed">
-                Tokens and actions are synchronized across counter and doctor cabin screens via Supabase Realtime.
+                Call the next patient when the cabin is ready.
+                Mark each visit as completed after consultation.
               </p>
             </div>
           </div>
@@ -808,6 +856,8 @@ export default function ReceptionDeskPage() {
                   <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-500 uppercase">Pos</th>
                   <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-500 uppercase">Token</th>
                   <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-500 uppercase">Patient Name</th>
+                  <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-500 uppercase">Age</th>
+                  <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-500 uppercase">Gender</th>
                   <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-500 uppercase">Priority</th>
                   <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-500 uppercase">Notes / Tag</th>
                   <th className="px-6 py-3.5 text-right text-xs font-bold text-slate-500 uppercase">Slip</th>
@@ -816,13 +866,13 @@ export default function ReceptionDeskPage() {
               <tbody className="bg-white divide-y divide-slate-100">
                 {loading ? (
                   <tr>
-                    <td colSpan={6} className="py-12 text-center text-slate-400 text-sm">
+                    <td colSpan={8} className="py-12 text-center text-slate-400 text-sm">
                       Loading synchronized queue...
                     </td>
                   </tr>
                 ) : queueTickets.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="py-12 text-center text-slate-400 text-sm">
+                    <td colSpan={8} className="py-12 text-center text-slate-400 text-sm">
                       No patients waiting in queue. Click <span className="font-bold text-blue-600">"+ Add Walk-In"</span> to register an offline patient.
                     </td>
                   </tr>
@@ -838,6 +888,12 @@ export default function ReceptionDeskPage() {
                       <td className="px-6 py-4">
                         <div className="text-sm font-bold text-slate-900">{t.patient_name}</div>
                         <div className="text-xs text-slate-500">{t.phone_number || 'Offline / No Phone'}</div>
+                      </td>
+                      <td className="px-6 py-4 text-sm font-semibold text-slate-700">
+                        {t.patient_age ?? '—'}
+                      </td>
+                      <td className="px-6 py-4 text-sm font-semibold capitalize text-slate-700">
+                        {t.patient_gender?.replaceAll('-', ' ') || '—'}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
                         {t.priority === 'emergency' && (
@@ -947,6 +1003,41 @@ export default function ReceptionDeskPage() {
                   placeholder="10-digit mobile number"
                   className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:ring-2 focus:ring-blue-500 focus:outline-hidden"
                 />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                    Patient Age *
+                  </label>
+                  <input
+                    type="number"
+                    required
+                    min="0"
+                    max="120"
+                    value={patientAge}
+                    onChange={(e) => setPatientAge(e.target.value)}
+                    placeholder="Age"
+                    className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:ring-2 focus:ring-blue-500 focus:outline-hidden"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                    Gender *
+                  </label>
+                  <select
+                    required
+                    value={patientGender}
+                    onChange={(e) => setPatientGender(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2.5 text-sm text-slate-900 focus:ring-2 focus:ring-blue-500 focus:outline-hidden"
+                  >
+                    <option value="">Select</option>
+                    <option value="female">Female</option>
+                    <option value="male">Male</option>
+                    <option value="other">Other</option>
+                    <option value="prefer-not-to-say">Prefer not to say</option>
+                  </select>
+                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
