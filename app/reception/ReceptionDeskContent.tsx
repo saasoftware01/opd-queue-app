@@ -1293,6 +1293,40 @@ export default function ReceptionDeskPage() {
           </div>
         </div>
       )}
+
+      {showLogoutModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-xs">
+          <div className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl">
+            <div className="flex flex-col items-center text-center">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-50 text-blue-600">
+                <LogOut className="h-5 w-5" />
+              </div>
+              <div className="mt-4">
+                <h3 className="text-base font-bold text-slate-900">Ready to leave the reception desk?</h3>
+                <p className="mt-2 text-xs leading-5 text-slate-500">
+                  You can sign back in anytime to manage the patient queue.
+                </p>
+              </div>
+            </div>
+            <div className="mt-6 flex justify-center gap-3">
+              <button
+                type="button"
+                onClick={() => setShowLogoutModal(false)}
+                className="cursor-pointer rounded-xl border border-slate-300 px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmLogout}
+                className="cursor-pointer rounded-xl bg-blue-600 px-4 py-2.5 text-xs font-bold text-white shadow-md hover:bg-blue-700"
+              >
+                Yes, Log Out
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
