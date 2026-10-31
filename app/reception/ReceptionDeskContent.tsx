@@ -70,6 +70,7 @@ export default function ReceptionDeskPage() {
   const [currentDoctor, setCurrentDoctor] = useState<ExtendedDoctor | null>(null);
 
   const [queueTickets, setQueueTickets] = useState<QueueTicket[]>([]);
+  const [skippedTickets, setSkippedTickets] = useState<QueueTicket[]>([]);
   const [currentPatient, setCurrentPatient] = useState<QueueTicket | null>(null);
   const [todayCompletedCount, setTodayCompletedCount] = useState<number>(0);
 
@@ -79,6 +80,7 @@ export default function ReceptionDeskPage() {
   const [newTimingInput, setNewTimingInput] = useState<string>('');
   const [newShiftInput, setNewShiftInput] = useState<string>('Morning');
   const [showLogoutModal, setShowLogoutModal] = useState<boolean>(false);
+  const [ticketToReactivate, setTicketToReactivate] = useState<QueueTicket | null>(null);
 
   const [loading, setLoading] = useState<boolean>(true);
   const [actionLoading, setActionLoading] = useState<boolean>(false);
@@ -219,6 +221,7 @@ export default function ReceptionDeskPage() {
 
       // Filter and sort waiting queue by priority
       const waiting = tickets.filter((t) => t.status === 'waiting');
+      const skipped = tickets.filter((t) => t.status === 'skipped' && t.doctor_id === docId);
       const priorityWeights = { emergency: 0, senior: 1, normal: 2 };
 
       waiting.sort((a, b) => {
@@ -229,6 +232,7 @@ export default function ReceptionDeskPage() {
       });
 
       setQueueTickets(waiting);
+      setSkippedTickets(skipped);
     } catch (err: any) {
       console.error('Queue load error:', err);
     }
@@ -326,6 +330,42 @@ export default function ReceptionDeskPage() {
       fetchDoctorQueue(currentDoctor.department_id, currentDoctor.id);
     } catch (err: any) {
       setErrorMsg(err.message || 'Failed to hold ticket');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // ACTION 4: Show reactivation confirmation
+  const handleReactivate = (ticket: QueueTicket) => {
+    setTicketToReactivate(ticket);
+  };
+
+  // ACTION 5: Reactivate a skipped patient
+  const confirmReactivate = async () => {
+    if (!ticketToReactivate || !currentDoctor) return;
+
+    const ticket = ticketToReactivate;
+    setTicketToReactivate(null);
+
+    setActionLoading(true);
+    setErrorMsg('');
+    setSuccessMsg('');
+
+    try {
+      const { error } = await supabase
+        .from('tickets')
+        .update({
+          status: 'waiting',
+          doctor_id: currentDoctor.id,
+        })
+        .eq('id', ticket.id);
+
+      if (error) throw error;
+
+      setSuccessMsg(`Token ${ticket.token_number} has been reactivated and added to the waiting queue.`);
+      await fetchDoctorQueue(currentDoctor.department_id, currentDoctor.id);
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Failed to reactivate patient');
     } finally {
       setActionLoading(false);
     }
@@ -841,7 +881,10 @@ export default function ReceptionDeskPage() {
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
           <div className="px-6 py-4 border-b border-slate-200 bg-slate-50/50 flex justify-between items-center">
             <div>
-              <h3 className="text-base font-bold text-slate-900">Waiting Queue ({queueTickets.length})</h3>
+              <h3 className="text-base font-bold text-slate-900">
+                Waiting Queue ({queueTickets.length})
+                {skippedTickets.length > 0 && ` · ${skippedTickets.length} on hold`}
+              </h3>
               <p className="text-xs text-slate-500">Sorted by Priority Tier & Arrival Timestamp</p>
             </div>
             <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">
@@ -860,26 +903,30 @@ export default function ReceptionDeskPage() {
                   <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-500 uppercase">Gender</th>
                   <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-500 uppercase">Priority</th>
                   <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-500 uppercase">Notes / Tag</th>
+                  <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-500 uppercase">Action</th>
                   <th className="px-6 py-3.5 text-right text-xs font-bold text-slate-500 uppercase">Slip</th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-slate-100">
                 {loading ? (
                   <tr>
-                    <td colSpan={8} className="py-12 text-center text-slate-400 text-sm">
+                    <td colSpan={9} className="py-12 text-center text-slate-400 text-sm">
                       Loading synchronized queue...
                     </td>
                   </tr>
-                ) : queueTickets.length === 0 ? (
+                ) : queueTickets.length === 0 && skippedTickets.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="py-12 text-center text-slate-400 text-sm">
+                    <td colSpan={9} className="py-12 text-center text-slate-400 text-sm">
                       No patients waiting in queue. Click <span className="font-bold text-blue-600">"+ Add Walk-In"</span> to register an offline patient.
                     </td>
                   </tr>
                 ) : (
-                  queueTickets.map((t, idx) => (
-                    <tr key={t.id} className="hover:bg-slate-50/80 transition-colors">
-                      <td className="px-6 py-4 text-xs font-bold text-slate-400">{idx + 1}</td>
+                  [...queueTickets, ...skippedTickets].map((t, idx) => {
+                    const isSkipped = t.status === 'skipped';
+
+                    return (
+                    <tr key={t.id} className={`hover:bg-slate-50/80 transition-colors ${isSkipped ? 'bg-amber-50/40' : ''}`}>
+                      <td className="px-6 py-4 text-xs font-bold text-slate-400">{isSkipped ? '—' : idx + 1}</td>
                       <td className="px-6 py-4 whitespace-nowrap">
                         <span className="px-3 py-1 bg-slate-100 text-slate-900 font-mono font-black text-sm rounded-lg border border-slate-200">
                           {t.token_number}
@@ -937,6 +984,19 @@ export default function ReceptionDeskPage() {
                           );
                         })()}
                       </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        {isSkipped ? (
+                          <button
+                            onClick={() => handleReactivate(t)}
+                            disabled={actionLoading}
+                            className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-sm disabled:opacity-50 cursor-pointer"
+                          >
+                            Reactivate
+                          </button>
+                        ) : (
+                          <span className="text-xs font-semibold text-emerald-700">Waiting</span>
+                        )}
+                      </td>
                       <td className="px-6 py-4 whitespace-nowrap text-right">
                         <button
                           onClick={() => setSelectedTicketForPrint(t)}
@@ -947,7 +1007,8 @@ export default function ReceptionDeskPage() {
                         </button>
                       </td>
                     </tr>
-                  ))
+                    );
+                  })
                 )}
               </tbody>
             </table>
@@ -1289,6 +1350,75 @@ export default function ReceptionDeskPage() {
                   {actionLoading ? 'Pausing...' : 'Confirm & Pause OPD'}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* MODAL: Confirm sign out */}
+      {showLogoutModal && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200">
+            <div className="flex flex-col items-center text-center">
+              <div className="w-10 h-10 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center">
+                <LogOut className="w-5 h-5" />
+              </div>
+              <div className="mt-4">
+                <h3 className="text-base font-bold text-slate-900">Ready to leave the reception desk?</h3>
+                <p className="text-xs leading-5 text-slate-500 mt-2">
+                  You can sign back in anytime to manage the patient queue.
+                </p>
+              </div>
+            </div>
+            <div className="flex justify-center gap-3 mt-6">
+              <button
+                type="button"
+                onClick={() => setShowLogoutModal(false)}
+                className="px-4 py-2.5 rounded-xl border border-slate-300 text-slate-700 text-xs font-bold hover:bg-slate-50 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmLogout}
+                className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-md cursor-pointer"
+              >
+                Yes, Log Out
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: Confirm patient reactivation */}
+      {ticketToReactivate && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200">
+            <div className="flex flex-col items-center text-center">
+              <div className="w-10 h-10 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center">
+                <UserCheck className="w-5 h-5" />
+              </div>
+              <div className="mt-4">
+                <h3 className="text-base font-bold text-slate-900">Reactivate this patient?</h3>
+                <p className="text-xs leading-5 text-slate-500 mt-2">
+                  Token {ticketToReactivate.token_number} will be added back to the waiting queue.
+                </p>
+              </div>
+            </div>
+            <div className="flex justify-center gap-3 mt-6">
+              <button
+                type="button"
+                onClick={() => setTicketToReactivate(null)}
+                className="px-4 py-2.5 rounded-xl border border-slate-300 text-slate-700 text-xs font-bold hover:bg-slate-50 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmReactivate}
+                className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-md cursor-pointer"
+              >
+                Yes, Reactivate
+              </button>
             </div>
           </div>
         </div>
