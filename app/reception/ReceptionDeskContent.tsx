@@ -770,8 +770,8 @@ export default function ReceptionDeskPage() {
     <div className="min-h-screen bg-slate-100 flex flex-col justify-between">
       {/* Top Header */}
       <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-xs">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 min-h-20 py-3 flex flex-col gap-3 sm:h-20 sm:flex-row sm:items-center sm:justify-between sm:py-0">
-          <div className="flex min-w-0 items-center space-x-3">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-20 flex items-center justify-between">
+          <div className="flex items-center space-x-3">
             
             <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center text-white shadow-md">
               {isSoloClinicMode ? <Building2 className="w-5 h-5" /> : <Users className="w-5 h-5" />}
@@ -1919,74 +1919,6 @@ export default function ReceptionDeskPage() {
                   {actionLoading ? 'Pausing...' : 'Confirm & Pause OPD'}
                 </button>
               </div>
-            </div>
-          </div>
-        </div>
-      )}
-      {showLogoutModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-xs">
-          <div className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl">
-            <div className="flex flex-col items-center text-center">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-50 text-blue-600">
-                <LogOut className="h-5 w-5" />
-              </div>
-              <div className="mt-4">
-                <h3 className="text-base font-bold text-slate-900">Ready to leave the reception desk?</h3>
-                <p className="mt-2 text-xs leading-5 text-slate-500">
-                  You can sign back in anytime to manage the patient queue.
-                </p>
-              </div>
-            </div>
-            <div className="mt-6 flex justify-center gap-3">
-              <button
-                type="button"
-                onClick={() => setShowLogoutModal(false)}
-                className="cursor-pointer rounded-xl border border-slate-300 px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={confirmLogout}
-                className="cursor-pointer rounded-xl bg-blue-600 px-4 py-2.5 text-xs font-bold text-white shadow-md hover:bg-blue-700"
-              >
-                Yes, Log Out
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* MODAL: Confirm patient reactivation */}
-      {ticketToReactivate && (
-        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200">
-            <div className="flex flex-col items-center text-center">
-              <div className="w-10 h-10 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center">
-                <UserCheck className="w-5 h-5" />
-              </div>
-              <div className="mt-4">
-                <h3 className="text-base font-bold text-slate-900">Reactivate this patient?</h3>
-                <p className="text-xs leading-5 text-slate-500 mt-2">
-                  Token {ticketToReactivate.token_number} will be added back to the waiting queue.
-                </p>
-              </div>
-            </div>
-            <div className="flex justify-center gap-3 mt-6">
-              <button
-                type="button"
-                onClick={() => setTicketToReactivate(null)}
-                className="px-4 py-2.5 rounded-xl border border-slate-300 text-slate-700 text-xs font-bold hover:bg-slate-50 cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={confirmReactivate}
-                className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-md cursor-pointer"
-              >
-                Yes, Reactivate
-              </button>
             </div>
           </div>
         </div>
