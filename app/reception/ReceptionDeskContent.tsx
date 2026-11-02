@@ -818,7 +818,7 @@ export default function ReceptionDeskPage() {
     <div className="min-h-screen bg-slate-100 flex flex-col justify-between">
       {/* Top Header */}
       <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-xs">
-        <div className="max-w-7xl mx-auto px-4 py-3 sm:px-6 lg:px-8 sm:h-20 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="max-w-7xl mx-auto px-4 py-3 sm:px-6 lg:px-8 lg:h-20 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex min-w-0 items-center space-x-3">
             
             <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center text-white shadow-md">
@@ -838,10 +838,10 @@ export default function ReceptionDeskPage() {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 items-stretch gap-2 sm:flex sm:flex-wrap sm:items-center sm:gap-3">
+          <div className="grid grid-cols-3 items-stretch gap-1.5 sm:gap-2 lg:flex lg:flex-wrap lg:items-center lg:gap-3">
             {/* Show Dropdown only if in Multi-Doctor Hospital mode */}
             {!isSoloClinicMode && (
-              <div className="col-span-2 flex min-w-0 items-center space-x-2 rounded-xl border border-slate-300 bg-slate-50 p-1.5 sm:col-span-1">
+              <div className="col-span-3 flex min-w-0 items-center space-x-2 rounded-xl border border-slate-300 bg-slate-50 p-1.5 lg:col-span-1">
                 <Stethoscope className="w-4 h-4 text-slate-500 ml-1.5" />
                 <select
                   value={selectedDoctorId}
@@ -873,7 +873,7 @@ export default function ReceptionDeskPage() {
                 setNewHolidayDate('');
                 setShowTimingModal(true);
               }}
-              className="col-span-2 flex min-w-0 items-center justify-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-bold text-blue-700 transition-colors hover:bg-blue-100 cursor-pointer sm:col-span-1"
+              className="col-span-3 flex min-w-0 items-center justify-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-bold text-blue-700 transition-colors hover:bg-blue-100 cursor-pointer lg:col-span-1"
               title="Click to edit doctor OPD schedule"
             >
               <Clock className="h-3.5 w-3.5 shrink-0 text-blue-600" />
@@ -889,35 +889,35 @@ export default function ReceptionDeskPage() {
               <span className="shrink-0 text-[10px] text-blue-500 underline">Edit</span>
             </button>
 
-                        {/* Emergency Broadcast / Pause OPD Button */}
+            {/* Emergency Broadcast / Pause OPD Button */}
             <button
               onClick={handleTogglePauseClick}
-              className={`flex min-w-0 items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-xs font-bold transition-all shadow-xs cursor-pointer sm:px-4 ${
+              className={`flex min-w-0 items-center justify-center gap-1 rounded-xl px-1.5 py-2 text-[10px] font-bold transition-all shadow-xs cursor-pointer sm:gap-1.5 sm:px-2.5 sm:py-2.5 sm:text-xs lg:gap-2 lg:px-4 ${
                 isOpdPaused
                   ? 'bg-amber-600 hover:bg-amber-700 text-white animate-pulse'
                   : 'bg-slate-200 hover:bg-slate-300 text-slate-700'
               }`}
             >
-              {isOpdPaused ? <PlayCircle className="w-4 h-4" /> : <PauseCircle className="w-4 h-4" />}
+              {isOpdPaused ? <PlayCircle className="h-3.5 w-3.5 shrink-0 sm:h-4 sm:w-4" /> : <PauseCircle className="h-3.5 w-3.5 shrink-0 sm:h-4 sm:w-4" />}
               <span className="truncate">{isOpdPaused ? 'Resume OPD' : 'Pause OPD'}</span>
             </button>
 
             {/* Quick Add Walk-in Button */}
             <button
               onClick={() => setShowWalkinModal(true)}
-              className="flex min-w-0 items-center justify-center gap-2 rounded-xl bg-blue-600 px-3 py-2.5 text-xs font-bold text-white shadow-md transition-colors hover:bg-blue-700 cursor-pointer sm:px-4"
+              className="flex min-w-0 items-center justify-center gap-1 rounded-xl bg-blue-600 px-1.5 py-2 text-[10px] font-bold text-white shadow-md transition-colors hover:bg-blue-700 cursor-pointer sm:gap-1.5 sm:px-2.5 sm:py-2.5 sm:text-xs lg:gap-2 lg:px-4"
             >
-              <UserPlus className="w-4 h-4" />
+              <UserPlus className="h-3.5 w-3.5 shrink-0 sm:h-4 sm:w-4" />
               <span className="truncate">+ Add Walk-In</span>
             </button>
 
             {/* Log Out Button */}
             <button
               onClick={handleLogout}
-              className="flex min-w-0 items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-slate-100 px-3 py-2.5 text-xs font-bold text-slate-600 transition-all hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600 cursor-pointer"
+              className="flex min-w-0 items-center justify-center gap-1 rounded-xl border border-slate-200 bg-slate-100 px-1.5 py-2 text-[10px] font-bold text-slate-600 transition-all hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600 cursor-pointer sm:gap-1.5 sm:px-2.5 sm:py-2.5 sm:text-xs lg:px-3"
               title="Log Out of Clinic Session"
             >
-              <LogOut className="w-4 h-4" />
+              <LogOut className="h-3.5 w-3.5 shrink-0 sm:h-4 sm:w-4" />
               <span className="truncate">Log Out</span>
             </button>
           </div>
