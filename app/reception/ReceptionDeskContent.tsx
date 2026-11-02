@@ -74,6 +74,7 @@ interface QueueTicket {
   completed_at?: string | null;
   paid_amount?: number | null;
   payment_mode?: 'CASH' | 'UPI' | 'CARD' | 'OTHER' | 'NONE' | null;
+  rating?: number | null;
   departments?: {
     name: string;
     code: string;
@@ -828,8 +829,8 @@ export default function ReceptionDeskPage() {
     <div className="min-h-screen bg-slate-100 flex flex-col justify-between">
       {/* Top Header */}
       <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-xs">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-20 flex items-center justify-between">
-          <div className="flex items-center space-x-3">
+        <div className="max-w-7xl mx-auto px-4 py-3 sm:px-6 lg:px-8 sm:h-20 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex min-w-0 items-center space-x-3">
             
             <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center text-white shadow-md">
               {isSoloClinicMode ? <Building2 className="w-5 h-5" /> : <Users className="w-5 h-5" />}
@@ -848,10 +849,10 @@ export default function ReceptionDeskPage() {
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="grid grid-cols-2 items-stretch gap-2 sm:flex sm:flex-wrap sm:items-center sm:gap-3">
             {/* Show Dropdown only if in Multi-Doctor Hospital mode */}
             {!isSoloClinicMode && (
-              <div className="flex items-center space-x-2 bg-slate-50 p-1.5 rounded-xl border border-slate-300">
+              <div className="col-span-2 flex min-w-0 items-center space-x-2 rounded-xl border border-slate-300 bg-slate-50 p-1.5 sm:col-span-1">
                 <Stethoscope className="w-4 h-4 text-slate-500 ml-1.5" />
                 <select
                   value={selectedDoctorId}
@@ -883,11 +884,11 @@ export default function ReceptionDeskPage() {
                 setNewHolidayDate('');
                 setShowTimingModal(true);
               }}
-              className="flex max-w-full items-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-bold text-blue-700 transition-colors hover:bg-blue-100 cursor-pointer"
+              className="col-span-2 flex min-w-0 items-center justify-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-bold text-blue-700 transition-colors hover:bg-blue-100 cursor-pointer sm:col-span-1"
               title="Click to edit doctor OPD schedule"
             >
               <Clock className="h-3.5 w-3.5 shrink-0 text-blue-600" />
-              <span className="min-w-0 max-w-[min(34rem,45vw)] text-left leading-4" title={currentDoctor
+              <span className="min-w-0 max-w-[min(34rem,45vw)] truncate text-left leading-4" title={currentDoctor
                 ? formatOpdSessions(getOpdSessions(currentDoctor.opd_sessions, currentDoctor.opd_shift, currentDoctor.opd_timing))
                   || `${currentDoctor.opd_shift || 'Morning'}: ${currentDoctor.opd_timing || '10:00 AM - 01:00 PM'}`
                 : 'Set OPD hours'}>
@@ -902,33 +903,33 @@ export default function ReceptionDeskPage() {
                         {/* Emergency Broadcast / Pause OPD Button */}
             <button
               onClick={handleTogglePauseClick}
-              className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer ${
+              className={`flex min-w-0 items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-xs font-bold transition-all shadow-xs cursor-pointer sm:px-4 ${
                 isOpdPaused
                   ? 'bg-amber-600 hover:bg-amber-700 text-white animate-pulse'
                   : 'bg-slate-200 hover:bg-slate-300 text-slate-700'
               }`}
             >
               {isOpdPaused ? <PlayCircle className="w-4 h-4" /> : <PauseCircle className="w-4 h-4" />}
-              <span>{isOpdPaused ? 'Resume OPD' : 'Pause OPD'}</span>
+              <span className="truncate">{isOpdPaused ? 'Resume OPD' : 'Pause OPD'}</span>
             </button>
 
             {/* Quick Add Walk-in Button */}
             <button
               onClick={() => setShowWalkinModal(true)}
-              className="flex items-center space-x-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-xl text-xs font-bold transition-colors shadow-md cursor-pointer"
+              className="flex min-w-0 items-center justify-center gap-2 rounded-xl bg-blue-600 px-3 py-2.5 text-xs font-bold text-white shadow-md transition-colors hover:bg-blue-700 cursor-pointer sm:px-4"
             >
               <UserPlus className="w-4 h-4" />
-              <span>+ Add Walk-In</span>
+              <span className="truncate">+ Add Walk-In</span>
             </button>
 
             {/* Log Out Button */}
             <button
               onClick={handleLogout}
-              className="flex items-center space-x-1.5 bg-slate-100 hover:bg-blue-50 hover:text-blue-600 text-slate-600 border border-slate-200 hover:border-blue-200 px-3 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer"
+              className="flex min-w-0 items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-slate-100 px-3 py-2.5 text-xs font-bold text-slate-600 transition-all hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600 cursor-pointer"
               title="Log Out of Clinic Session"
             >
               <LogOut className="w-4 h-4" />
-              <span>Log Out</span>
+              <span className="truncate">Log Out</span>
             </button>
           </div>
         </div>
@@ -972,23 +973,23 @@ export default function ReceptionDeskPage() {
           {/* Active Cabin Consultation Card */}
           <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-200 p-6 shadow-sm flex flex-col justify-between">
             <div>
-              <div className="flex items-center justify-between pb-4 border-b border-slate-100">
-                <div className="flex items-center space-x-3">
-                  <div>
-                    <h2 className="text-lg font-bold text-slate-900">{currentDoctor?.name}</h2>
+              <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-slate-100">
+                <div className="flex min-w-0 items-center space-x-3">
+                  <div className="min-w-0">
+                    <h2 className="truncate text-lg font-bold text-slate-900">{currentDoctor?.name || 'Doctor'}</h2>
                     <p className="text-xs text-slate-500">Currently in consultation</p>
                   </div>
-                  <span className="px-3 py-1 bg-emerald-100 text-emerald-800 text-xs font-black rounded-lg">
+                  <span className="shrink-0 rounded-lg bg-emerald-100 px-3 py-1 text-xs font-black text-emerald-800">
                     {currentDoctor ? currentDoctor.room_number : 'Room 1'}
                   </span>
                 </div>
 
                 {currentPatient ? (
-                  <span className="px-3 py-1 rounded-full text-xs font-black bg-emerald-100 text-emerald-800 animate-pulse">
+                  <span className="shrink-0 rounded-full bg-emerald-100 px-3 py-1 text-xs font-black text-emerald-800 animate-pulse">
                     Inside Cabin
                   </span>
                 ) : (
-                  <span className="px-3 py-1 rounded-full text-xs font-bold bg-slate-100 text-slate-500">
+                  <span className="shrink-0 rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-500">
                     Cabin Ready / Empty
                   </span>
                 )}

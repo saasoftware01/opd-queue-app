@@ -21,7 +21,8 @@ import {
   Printer,
   Users,
   Compass,
-  Volume2
+  Volume2,
+  Star
 } from 'lucide-react';
 
 interface ClinicDirectoryRecord {
@@ -49,12 +50,19 @@ interface DoctorDirectoryRecord {
   department_id: string | null;
   opd_status?: string | null;
   broadcast_message?: string | null;
+  rating?: number | null;
 }
 
 interface QueueMetricTicket {
   doctor_id: string | null;
   status: string;
   token_number: string | null;
+  patient_name: string | null;
+}
+
+interface DoctorRatingTicket {
+  doctor_id: string | null;
+  rating: number | null;
 }
 
 interface TrackedDoctorDetails {
@@ -85,8 +93,10 @@ interface DoctorDirectoryItem {
   department_name: string;
   waiting_count?: number;
   current_token?: string | null;
+  current_patient_name?: string | null;
   opd_status?: string;
   broadcast_message?: string | null;
+  rating: number;
 }
 
 interface ConfirmedTicket {
@@ -101,6 +111,7 @@ interface ConfirmedTicket {
   status: string;
   created_at?: string;
   doctor_id?: string;
+  rating?: number | null;
 }
 
 function getErrorMessage(error: unknown, fallback: string): string {
@@ -167,6 +178,9 @@ function DoctorBookingDirectoryContent() {
   const [trackerPhone, setTrackerPhone] = useState('');
   const [trackerLoading, setTrackerLoading] = useState(false);
   const [trackerError, setTrackerError] = useState('');
+  const [patientRating, setPatientRating] = useState(0);
+  const [ratingSaving, setRatingSaving] = useState(false);
+  const [ratingMessage, setRatingMessage] = useState('');
 
   // 1. Fetch all doctors and their live queue metrics for today
   useEffect(() => {
@@ -178,20 +192,27 @@ function DoctorBookingDirectoryContent() {
         const today = new Date().toISOString().split('T')[0];
 
         // Safe parallel queries using allSettled so one table never breaks the others
-        const [docRes, clinicsRes, deptsRes, ticketsRes] = await Promise.allSettled([
+        const [docRes, clinicsRes, deptsRes, ticketsRes, ratingsRes] = await Promise.allSettled([
           supabase.from('doctors').select('*').order('created_at', { ascending: false }),
           supabase.from('clinics').select('id, name, booking_fee'),
           supabase.from('departments').select('id, name'),
           supabase
             .from('tickets')
-            .select('id, doctor_id, status, token_number')
+            .select('id, doctor_id, status, token_number, patient_name')
             .gte('created_at', `${today}T00:00:00.000Z`)
+          ,
+          supabase
+            .from('tickets')
+            .select('doctor_id, rating')
+            .eq('status', 'completed')
+            .not('rating', 'is', null)
         ]);
 
         const docData: DoctorDirectoryRecord[] = docRes.status === 'fulfilled' && docRes.value.data ? docRes.value.data : [];
         const clinicsData: ClinicDirectoryRecord[] = clinicsRes.status === 'fulfilled' && clinicsRes.value.data ? clinicsRes.value.data : [];
         const deptsData: DepartmentDirectoryRecord[] = deptsRes.status === 'fulfilled' && deptsRes.value.data ? deptsRes.value.data : [];
         const todayTickets: QueueMetricTicket[] = ticketsRes.status === 'fulfilled' && ticketsRes.value.data ? ticketsRes.value.data : [];
+        const ratingTickets: DoctorRatingTicket[] = ratingsRes.status === 'fulfilled' && ratingsRes.value.data ? ratingsRes.value.data : [];
 
         if (!isMounted) return;
 
@@ -203,6 +224,14 @@ function DoctorBookingDirectoryContent() {
 
         const clinicMap = new Map(clinicsData.map((clinic): [string, ClinicDirectoryRecord] => [clinic.id, clinic]));
         const deptMap = new Map(deptsData.map((department): [string, string] => [department.id, department.name]));
+        const ratingMap = new Map<string, { total: number; count: number }>();
+        ratingTickets.forEach((ticket) => {
+          if (!ticket.doctor_id || ticket.rating == null) return;
+          const current = ratingMap.get(ticket.doctor_id) || { total: 0, count: 0 };
+          current.total += ticket.rating;
+          current.count += 1;
+          ratingMap.set(ticket.doctor_id, current);
+        });
 
         const formatted: DoctorDirectoryItem[] = docData.map(doc => {
           const clinic = doc.clinic_id ? clinicMap.get(doc.clinic_id) : null;
@@ -211,6 +240,7 @@ function DoctorBookingDirectoryContent() {
           const docTickets = todayTickets.filter(ticket => ticket.doctor_id === doc.id);
           const waitingCount = docTickets.filter(ticket => ticket.status === 'waiting').length;
           const activeConsultation = docTickets.find(ticket => ticket.status === 'in-consultation');
+          const rating = ratingMap.get(doc.id);
 
           return {
             id: doc.id,
@@ -228,8 +258,10 @@ function DoctorBookingDirectoryContent() {
             department_name: deptName || 'General OPD',
             waiting_count: waitingCount,
             current_token: activeConsultation?.token_number || null,
+            current_patient_name: activeConsultation?.patient_name || null,
             opd_status: doc.opd_status || 'ACTIVE',
             broadcast_message: doc.broadcast_message || null,
+            rating: rating ? rating.total / rating.count : 3,
           };
         });
 
@@ -308,12 +340,12 @@ function DoctorBookingDirectoryContent() {
 
         const { data: currentT } = await supabase
           .from('tickets')
-          .select('status, token_number, created_at, doctor_id')
+        .select('status, token_number, created_at, doctor_id, rating')
           .eq('id', activeTicketId)
           .single();
 
         if (currentT) {
-          setConfirmedTicket(prev => prev ? { ...prev, status: currentT.status } : null);
+          setConfirmedTicket(prev => prev ? { ...prev, status: currentT.status, rating: currentT.rating } : null);
 
           const { data: inCabin } = await supabase
             .from('tickets')
@@ -494,6 +526,7 @@ function DoctorBookingDirectoryContent() {
           patient_name,
           phone_number,
           status,
+          rating,
           created_at,
           doctors (
             name,
@@ -527,12 +560,36 @@ function DoctorBookingDirectoryContent() {
         status: ticket.status,
         created_at: ticket.created_at,
         doctor_id: ticket.doctor_id,
+        rating: ticket.rating,
       });
 
     } catch (err: unknown) {
       setTrackerError(getErrorMessage(err, 'Unable to track token.'));
     } finally {
       setTrackerLoading(false);
+    }
+  };
+
+  const handlePatientRating = async (rating: number) => {
+    if (!confirmedTicket || confirmedTicket.status !== 'completed' || confirmedTicket.rating != null) return;
+
+    setRatingSaving(true);
+    setRatingMessage('');
+    try {
+      const { error } = await supabase
+        .from('tickets')
+        .update({ rating })
+        .eq('id', confirmedTicket.id)
+        .is('rating', null);
+
+      if (error) throw error;
+      setConfirmedTicket((current) => current ? { ...current, rating } : null);
+      setRatingMessage('Thank you for rating your doctor.');
+    } catch (error) {
+      console.error('Failed to save patient rating:', error);
+      setRatingMessage('Unable to save your rating. Please try again.');
+    } finally {
+      setRatingSaving(false);
     }
   };
 
@@ -705,13 +762,74 @@ function DoctorBookingDirectoryContent() {
                   </p>
                 </div>
               ) : confirmedTicket.status === 'completed' ? (
-                <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-center space-y-2">
-                  <div className="text-xs font-bold text-emerald-800 uppercase tracking-wide">
-                    Visit Complete
+                <div className="space-y-4">
+                  <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-center space-y-2">
+                    <div className="text-xs font-bold text-emerald-800 uppercase tracking-wide">
+                      Visit Complete
+                    </div>
+                    <p className="text-xs text-emerald-700 leading-relaxed">
+                      Please collect your prescription and medical receipts from the reception counter or pharmacy desk.
+                    </p>
                   </div>
-                  <p className="text-xs text-emerald-700 leading-relaxed">
-                    Please collect your prescription and medical receipts from the reception counter or pharmacy desk.
-                  </p>
+
+                  <div className="overflow-hidden rounded-2xl border border-amber-200 bg-gradient-to-br from-amber-50 via-white to-orange-50 shadow-sm">
+                    <div className="border-b border-amber-100 px-4 pb-3 pt-4 text-center">
+                      <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-full bg-amber-100 text-amber-500">
+                        <Star className="h-5 w-5 fill-current" />
+                      </div>
+                      <div className="mt-2 text-sm font-black text-slate-900">
+                        How was your visit?
+                      </div>
+                      <p className="mt-1 text-xs text-slate-500">
+                        Rate your consultation with <span className="font-bold text-slate-700">{confirmedTicket.doctor_name}</span>
+                      </p>
+                    </div>
+                    {confirmedTicket.rating == null ? (
+                      <div className="px-4 pb-4 pt-3">
+                        <div className="flex justify-center gap-1.5" role="radiogroup" aria-label="Rate your doctor">
+                          {[1, 2, 3, 4, 5].map((rating) => (
+                            <button
+                              key={rating}
+                              type="button"
+                              role="radio"
+                              aria-label={`${rating} out of 5 stars`}
+                              aria-checked={patientRating === rating}
+                              disabled={ratingSaving}
+                              onClick={() => {
+                                setPatientRating(rating);
+                                void handlePatientRating(rating);
+                              }}
+                              className={`flex h-12 w-12 flex-col items-center justify-center rounded-xl border transition-all ${
+                                patientRating >= rating
+                                  ? 'border-amber-300 bg-amber-100 text-amber-500 shadow-sm'
+                                  : 'border-slate-200 bg-white text-slate-300 hover:border-amber-300 hover:bg-amber-50 hover:text-amber-400'
+                              } disabled:cursor-not-allowed disabled:opacity-60`}
+                            >
+                              <Star className="h-5 w-5 fill-current" />
+                              <span className="mt-0.5 text-[9px] font-bold">{rating}</span>
+                            </button>
+                          ))}
+                        </div>
+                        <p className="mt-3 text-center text-[11px] font-medium text-slate-400">
+                          {ratingSaving ? 'Saving your rating...' : 'Tap a star to submit'}
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="px-4 pb-4 pt-3 text-center">
+                        <div className="flex justify-center gap-1 text-amber-400">
+                          {[1, 2, 3, 4, 5].map((star) => (
+                            <Star key={star} className={`h-5 w-5 ${star <= confirmedTicket.rating! ? 'fill-current' : 'text-slate-200'}`} />
+                          ))}
+                        </div>
+                        <p className="mt-2 text-xs font-bold text-emerald-700">
+                          Thank you. You rated this visit {confirmedTicket.rating}/5.
+                        </p>
+                      </div>
+                    )}
+                    {ratingMessage && !confirmedTicket.rating && (
+                      <p className="px-4 pb-3 text-center text-xs font-semibold text-rose-700">{ratingMessage}</p>
+                    )}
+                  </div>
                 </div>
               ) : (
                 <div className="grid grid-cols-2 gap-3 p-4 rounded-2xl bg-blue-50/60 border border-blue-100">
@@ -923,6 +1041,17 @@ function DoctorBookingDirectoryContent() {
 
                       {/* Doctor & Clinic */}
                       <h3 className="text-base font-black text-slate-900 tracking-tight">{doc.name}</h3>
+                      <div className="mt-1 flex items-center gap-1.5" aria-label={`Doctor rating ${doc.rating.toFixed(1)} out of 5`}>
+                        <div className="flex items-center text-amber-400">
+                          {[1, 2, 3, 4, 5].map((star) => (
+                            <Star
+                              key={star}
+                              className={`h-3.5 w-3.5 ${star <= Math.round(doc.rating) ? 'fill-current' : 'text-slate-200'}`}
+                            />
+                          ))}
+                        </div>
+                        <span className="text-[11px] font-bold text-slate-600">{doc.rating.toFixed(1)}/5</span>
+                      </div>
                       
                       <div className="mt-1 flex items-center gap-1.5 text-xs text-slate-600 font-medium">
                         <Building2 className="w-3.5 h-3.5 text-slate-400 shrink-0" />
@@ -958,14 +1087,36 @@ function DoctorBookingDirectoryContent() {
                         </div>
                       )}
 
-                      {/* Live Queue Pulse Indicator */}
-                      <div className="mt-3.5 py-2 px-3 rounded-xl bg-slate-50 border border-slate-100 flex items-center justify-between text-xs">
-                        <span className="text-slate-500 font-medium flex items-center gap-1.5">
-                          <Users className="w-3.5 h-3.5 text-blue-600" />
-                          <span>Waiting in line:</span>
-                        </span>
-                        <span className="font-bold text-slate-900">{doc.waiting_count || 0} patients</span>
-                      </div>
+                      {/* Live Queue Broadcast */}
+                      {doc.current_token ? (
+                        <div className="mt-3.5 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs">
+                          <div className="flex items-center gap-1.5 font-bold text-blue-700">
+                            <Users className="h-3.5 w-3.5" />
+                            <span>Now consulting</span>
+                          </div>
+                          <div className="mt-1 flex items-center justify-between gap-2">
+                            <span className="truncate font-semibold text-slate-700">
+                              {doc.current_patient_name || 'Current patient'}
+                            </span>
+                            <span className="shrink-0 rounded-md bg-white px-2 py-1 font-mono font-black text-blue-700 shadow-sm">
+                              {doc.current_token}
+                            </span>
+                          </div>
+                        </div>
+                      ) : doc.waiting_count ? (
+                        <div className="mt-3.5 flex items-center justify-between rounded-xl border border-slate-100 bg-slate-50 px-3 py-2 text-xs">
+                          <span className="flex items-center gap-1.5 font-medium text-slate-500">
+                            <Users className="h-3.5 w-3.5 text-blue-600" />
+                            <span>Waiting in line</span>
+                          </span>
+                          <span className="font-bold text-slate-900">{doc.waiting_count} patients</span>
+                        </div>
+                      ) : (
+                        <div className="mt-3.5 flex items-center gap-1.5 rounded-xl border border-slate-100 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-500">
+                          <Users className="h-3.5 w-3.5 text-slate-400" />
+                          <span>No patients waiting yet</span>
+                        </div>
+                      )}
                     </div>
 
                     {/* Action Button */}

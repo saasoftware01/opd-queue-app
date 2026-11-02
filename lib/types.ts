@@ -28,6 +28,7 @@ export interface Ticket {
   patient_gender?: string;
   paid_amount?: number | null;
   payment_mode?: 'CASH' | 'UPI' | 'CARD' | 'OTHER' | 'NONE' | null;
+  rating?: number | null;
   department_id: string;
   doctor_id?: string;
   status: TicketStatus;

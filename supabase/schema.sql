@@ -49,6 +49,7 @@ create table if not exists public.tickets (
   patient_gender text,
   paid_amount numeric(10, 2) check (paid_amount is null or paid_amount >= 0),
   payment_mode text check (payment_mode is null or payment_mode in ('CASH', 'UPI', 'CARD', 'OTHER', 'NONE')),
+  rating integer check (rating is null or rating between 1 and 5),
   department_id uuid references public.departments(id) on delete cascade not null,
   doctor_id uuid references public.doctors(id) on delete set null,
   status ticket_status default 'waiting' not null,
@@ -73,6 +74,10 @@ alter table public.tickets
 alter table public.tickets
   add column if not exists payment_mode text
   check (payment_mode is null or payment_mode in ('CASH', 'UPI', 'CARD', 'OTHER', 'NONE'));
+
+alter table public.tickets
+  add column if not exists rating integer
+  check (rating is null or rating between 1 and 5);
 
 -- 5. Enable Row Level Security (RLS)
 alter table public.departments enable row level security;
