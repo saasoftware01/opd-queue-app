@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
 import { 
   Stethoscope, 
@@ -18,12 +18,16 @@ import {
 } from 'lucide-react';
 import { supabase } from '@/lib/supabase/client';
 import { Ticket, Doctor, Department } from '@/lib/types';
+import { getErrorMessage } from '@/lib/error-message';
 
 export default function DoctorDashboardPage() {
   const [doctors, setDoctors] = useState<Doctor[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
   const [selectedDoctorId, setSelectedDoctorId] = useState<string>('');
-  const [currentDoctor, setCurrentDoctor] = useState<Doctor | null>(null);
+  const currentDoctor = useMemo(
+    () => doctors.find((doctor) => doctor.id === selectedDoctorId) || null,
+    [doctors, selectedDoctorId]
+  );
 
   const [queueTickets, setQueueTickets] = useState<Ticket[]>([]);
   const [currentPatient, setCurrentPatient] = useState<Ticket | null>(null);
@@ -51,11 +55,10 @@ export default function DoctorDashboardPage() {
 
         if (docRes.data && docRes.data.length > 0) {
           setSelectedDoctorId(docRes.data[0].id);
-          setCurrentDoctor(docRes.data[0]);
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
         console.error('Error loading doctor data:', err);
-        setErrorMsg(err.message || 'Failed to load doctors');
+        setErrorMsg(getErrorMessage(err, 'Failed to load doctors'));
       } finally {
         setLoading(false);
       }
@@ -67,13 +70,12 @@ export default function DoctorDashboardPage() {
   useEffect(() => {
     if (!selectedDoctorId) return;
     const doc = doctors.find(d => d.id === selectedDoctorId) || null;
-    setCurrentDoctor(doc);
     if (doc) {
-      fetchQueue(doc.department_id, doc.id);
+      void fetchQueue(doc.department_id, doc.id);
     }
   }, [selectedDoctorId, doctors]);
 
-  const fetchQueue = async (deptId: string, docId: string) => {
+  async function fetchQueue(deptId: string, docId: string) {
     try {
       setLoading(true);
       const { data, error } = await supabase
@@ -100,12 +102,12 @@ export default function DoctorDashboardPage() {
       });
 
       setQueueTickets(waiting);
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Error fetching queue:', err);
     } finally {
       setLoading(false);
     }
-  };
+  }
 
   useEffect(() => {
     if (!currentDoctor) return;
@@ -173,8 +175,8 @@ export default function DoctorDashboardPage() {
 
       setSuccessMsg(`Called Token ${nextTicket.token_number} (${nextTicket.patient_name})`);
       fetchQueue(currentDoctor.department_id, currentDoctor.id);
-    } catch (err: any) {
-      setErrorMsg(err.message || 'Failed to call next patient');
+    } catch (err: unknown) {
+      setErrorMsg(getErrorMessage(err, 'Failed to call next patient'));
     } finally {
       setActionLoading(false);
     }
@@ -201,8 +203,8 @@ export default function DoctorDashboardPage() {
       setSuccessMsg(`Completed consultation for ${currentPatient.token_number}`);
       setCurrentPatient(null);
       fetchQueue(currentDoctor.department_id, currentDoctor.id);
-    } catch (err: any) {
-      setErrorMsg(err.message || 'Failed to complete consultation');
+    } catch (err: unknown) {
+      setErrorMsg(getErrorMessage(err, 'Failed to complete consultation'));
     } finally {
       setActionLoading(false);
     }
@@ -228,8 +230,8 @@ export default function DoctorDashboardPage() {
       setSuccessMsg(`Skipped token ${currentPatient.token_number}`);
       setCurrentPatient(null);
       fetchQueue(currentDoctor.department_id, currentDoctor.id);
-    } catch (err: any) {
-      setErrorMsg(err.message || 'Failed to skip patient');
+    } catch (err: unknown) {
+      setErrorMsg(getErrorMessage(err, 'Failed to skip patient'));
     } finally {
       setActionLoading(false);
     }
@@ -260,8 +262,8 @@ export default function DoctorDashboardPage() {
       setTargetDeptId('');
       setCurrentPatient(null);
       fetchQueue(currentDoctor.department_id, currentDoctor.id);
-    } catch (err: any) {
-      setErrorMsg(err.message || 'Failed to transfer patient');
+    } catch (err: unknown) {
+      setErrorMsg(getErrorMessage(err, 'Failed to transfer patient'));
     } finally {
       setActionLoading(false);
     }

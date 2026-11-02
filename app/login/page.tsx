@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase/client';
+import { getErrorMessage } from '@/lib/error-message';
 import { 
   Stethoscope, 
   AlertCircle, 
@@ -44,7 +45,7 @@ export default function LoginPage() {
       const userEmail = authData.user.email?.toLowerCase() || '';
 
       // 2. Fetch Clinic associated with this owner
-      const { data: clinic, error: clinicError } = await supabase
+      const { data: clinic } = await supabase
         .from('clinics')
         .select('id, name, type')
         .eq('owner_id', authData.user.id)
@@ -95,12 +96,13 @@ export default function LoginPage() {
       // Fallback: Default reception desk
       router.push('/reception');
 
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Login error:', err);
+      const message = getErrorMessage(err, 'Failed to authenticate. Please try again.');
       setErrorMsg(
-        err.message?.toLowerCase().includes('invalid login credentials')
+        message.toLowerCase().includes('invalid login credentials')
           ? 'Invalid email or password. Please verify and try again.'
-          : err.message || 'Failed to authenticate. Please try again.'
+          : message
       );
     } finally {
       setLoading(false);
@@ -170,7 +172,7 @@ export default function LoginPage() {
               </div>
               <div>
                 <h4 className="text-xs font-bold text-white">Instant Doctor-Counter Sync</h4>
-                <p className="text-[11px] text-slate-400 mt-0.5">Tokens called inside the doctor's cabin sync instantly to reception.</p>
+                <p className="text-[11px] text-slate-400 mt-0.5">Tokens called inside the doctor&apos;s cabin sync instantly to reception.</p>
               </div>
             </div>
           </div>

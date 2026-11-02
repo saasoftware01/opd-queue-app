@@ -1,9 +1,10 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase/client';
+import { getErrorMessage } from '@/lib/error-message';
 import { Building2, Stethoscope, ArrowLeft, CheckCircle2, AlertCircle, ArrowRight } from 'lucide-react';
 
 export default function RegisterClinicPage() {
@@ -24,17 +25,6 @@ export default function RegisterClinicPage() {
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
-
-  // Reset form states whenever component mounts
-  useEffect(() => {
-    setErrorMsg('');
-    setSuccessMsg('');
-    setClinicName('');
-    setDoctorName('');
-    setEmail('');
-    setPassword('');
-    setPhone('');
-  }, []);
 
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -137,9 +127,9 @@ export default function RegisterClinicPage() {
         }
       }, 1200);
 
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Registration failed:', err);
-      setErrorMsg(err.message || 'Failed to complete registration.');
+      setErrorMsg(getErrorMessage(err, 'Failed to complete registration.'));
     } finally {
       setLoading(false);
     }

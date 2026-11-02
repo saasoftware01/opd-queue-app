@@ -1,7 +1,6 @@
 'use client';
 
 import React, { useState, useEffect, useMemo } from 'react';
-import Link from 'next/link';
 import { useSearchParams, useRouter, usePathname } from 'next/navigation';
 import { supabase } from '@/lib/supabase/client';
 
@@ -9,12 +8,10 @@ import {
   Users, 
   UserPlus, 
   Printer, 
-  ArrowLeft, 
   AlertCircle, 
   CheckCircle2, 
   X,
   Clock,
-  ShieldAlert,
   UserCheck,
   SkipForward,
   PauseCircle,
@@ -44,6 +41,7 @@ import {
   OPD_SHIFTS,
   OpdSession,
 } from '@/lib/opd-schedule';
+import { getErrorMessage } from '@/lib/error-message';
 
 interface ExtendedDoctor extends Doctor {
   clinic_name?: string;
@@ -115,7 +113,10 @@ export default function ReceptionDeskPage() {
   const [departments, setDepartments] = useState<Department[]>([]);
   const [doctors, setDoctors] = useState<ExtendedDoctor[]>([]);
   const [selectedDoctorId, setSelectedDoctorId] = useState<string>('');
-  const [currentDoctor, setCurrentDoctor] = useState<ExtendedDoctor | null>(null);
+  const currentDoctor = useMemo(
+    () => doctors.find((doctor) => doctor.id === selectedDoctorId) || null,
+    [doctors, selectedDoctorId]
+  );
 
   const [queueTickets, setQueueTickets] = useState<QueueTicket[]>([]);
   const [skippedTickets, setSkippedTickets] = useState<QueueTicket[]>([]);
@@ -195,12 +196,10 @@ export default function ReceptionDeskPage() {
             : docs[0].id;
           
           setSelectedDoctorId(targetDocId);
-          const initialDoc = docs.find(d => d.id === targetDocId) || docs[0];
-          setCurrentDoctor(initialDoc);
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
         console.error('Initialization error:', err);
-        setErrorMsg(err.message || 'Failed to load doctors and departments');
+        setErrorMsg(getErrorMessage(err, 'Failed to load doctors and departments'));
       } finally {
         setLoading(false);
       }
@@ -213,9 +212,8 @@ export default function ReceptionDeskPage() {
   useEffect(() => {
     if (!selectedDoctorId || doctors.length === 0) return;
     const doc = doctors.find((d) => d.id === selectedDoctorId) || null;
-    setCurrentDoctor(doc);
     if (doc) {
-      fetchDoctorQueue(doc.department_id, doc.id);
+      void fetchDoctorQueue(doc.department_id, doc.id);
     }
   }, [selectedDoctorId, doctors]);
 
@@ -255,7 +253,7 @@ export default function ReceptionDeskPage() {
   }, [currentDoctor]);
 
   // Fetch queue items matching the active department/doctor
-  const fetchDoctorQueue = async (deptId: string, docId: string) => {
+  async function fetchDoctorQueue(deptId: string, docId: string) {
     try {
       const today = new Date().toISOString().split('T')[0];
 
@@ -292,10 +290,10 @@ export default function ReceptionDeskPage() {
 
       setQueueTickets(waiting);
       setSkippedTickets(skipped);
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Queue load error:', err);
     }
-  };
+  }
 
   const historyDoctorId = currentDoctor?.id;
   const historyDepartmentId = currentDoctor?.department_id;
@@ -425,8 +423,8 @@ export default function ReceptionDeskPage() {
 
       setSuccessMsg(`Called Token ${nextTicket.token_number} (${nextTicket.patient_name})`);
       fetchDoctorQueue(currentDoctor.department_id, currentDoctor.id);
-    } catch (err: any) {
-      setErrorMsg(err.message || 'Failed to call next patient');
+    } catch (err: unknown) {
+      setErrorMsg(getErrorMessage(err, 'Failed to call next patient'));
     } finally {
       setActionLoading(false);
     }
@@ -481,8 +479,8 @@ export default function ReceptionDeskPage() {
       setShowCompleteModal(false);
       setCurrentPatient(null);
       fetchDoctorQueue(currentDoctor.department_id, currentDoctor.id);
-    } catch (err: any) {
-      setCompletionError(err.message || 'Failed to complete consultation');
+    } catch (err: unknown) {
+      setCompletionError(getErrorMessage(err, 'Failed to complete consultation'));
     } finally {
       setActionLoading(false);
     }
@@ -509,8 +507,8 @@ export default function ReceptionDeskPage() {
       setSuccessMsg(`Put Token ${currentPatient.token_number} on hold / skipped`);
       setCurrentPatient(null);
       fetchDoctorQueue(currentDoctor.department_id, currentDoctor.id);
-    } catch (err: any) {
-      setErrorMsg(err.message || 'Failed to hold ticket');
+    } catch (err: unknown) {
+      setErrorMsg(getErrorMessage(err, 'Failed to hold ticket'));
     } finally {
       setActionLoading(false);
     }
@@ -545,8 +543,8 @@ export default function ReceptionDeskPage() {
 
       setSuccessMsg(`Token ${ticket.token_number} has been reactivated and added to the waiting queue.`);
       await fetchDoctorQueue(currentDoctor.department_id, currentDoctor.id);
-    } catch (err: any) {
-      setErrorMsg(err.message || 'Failed to reactivate patient');
+    } catch (err: unknown) {
+      setErrorMsg(getErrorMessage(err, 'Failed to reactivate patient'));
     } finally {
       setActionLoading(false);
     }
@@ -613,8 +611,8 @@ export default function ReceptionDeskPage() {
       setPaymentMode('CASH');
 
       fetchDoctorQueue(currentDoctor.department_id, currentDoctor.id);
-    } catch (err: any) {
-      setErrorMsg(err.message || 'Failed to create walk-in token');
+    } catch (err: unknown) {
+      setErrorMsg(getErrorMessage(err, 'Failed to create walk-in token'));
     } finally {
       setActionLoading(false);
     }
@@ -648,7 +646,6 @@ export default function ReceptionDeskPage() {
 
       if (error) throw error;
 
-      setCurrentDoctor(prev => prev ? { ...prev, opd_status: status, broadcast_message: message } : null);
       setDoctors(prev => prev.map(doctor =>
         doctor.id === currentDoctor.id
           ? { ...doctor, opd_status: status, broadcast_message: message }
@@ -661,8 +658,8 @@ export default function ReceptionDeskPage() {
       } else {
         setSuccessMsg('OPD resumed. Queue operations active.');
       }
-    } catch (err: any) {
-      setErrorMsg(err.message || 'Failed to update OPD status');
+    } catch (err: unknown) {
+      setErrorMsg(getErrorMessage(err, 'Failed to update OPD status'));
     } finally {
       setActionLoading(false);
     }
@@ -706,14 +703,6 @@ export default function ReceptionDeskPage() {
 
       if (error) throw error;
 
-      setCurrentDoctor({
-        ...currentDoctor,
-        opd_timing: legacyTiming,
-        opd_shift: firstSession.shift,
-        opd_sessions: newOpdSessions,
-        weekly_off_days: newWeeklyOffDays,
-        opd_holiday_dates: newHolidayDates,
-      });
       setDoctors((previousDoctors) => previousDoctors.map((doctor) =>
         doctor.id === currentDoctor.id
           ? {
@@ -728,8 +717,8 @@ export default function ReceptionDeskPage() {
       ));
       setShowTimingModal(false);
       setSuccessMsg(`Updated OPD schedule for ${currentDoctor.name}.`);
-    } catch (err: any) {
-      setTimingError(err.message || 'Failed to update the OPD schedule.');
+    } catch (err: unknown) {
+      setTimingError(getErrorMessage(err, 'Failed to update the OPD schedule.'));
     } finally {
       setActionLoading(false);
     }
@@ -1262,7 +1251,7 @@ export default function ReceptionDeskPage() {
                 ) : queueTickets.length === 0 && skippedTickets.length === 0 ? (
                   <tr>
                     <td colSpan={10} className="py-12 text-center text-slate-400 text-sm">
-                      No patients waiting in queue. Click <span className="font-bold text-blue-600">"+ Add Walk-In"</span> to register an offline patient.
+                      No patients waiting in queue. Click <span className="font-bold text-blue-600">&quot;+ Add Walk-In&quot;</span> to register an offline patient.
                     </td>
                   </tr>
                 ) : (
@@ -1790,7 +1779,12 @@ export default function ReceptionDeskPage() {
                   </label>
                   <select
                     value={priority}
-                    onChange={(e) => setPriority(e.target.value as any)}
+                    onChange={(e) => {
+                      const selectedPriority = e.target.value;
+                      if (selectedPriority === 'normal' || selectedPriority === 'senior' || selectedPriority === 'emergency') {
+                        setPriority(selectedPriority);
+                      }
+                    }}
                     className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-xs font-bold text-slate-800 focus:ring-2 focus:ring-blue-500"
                   >
                     <option value="normal">Normal</option>
@@ -1805,7 +1799,11 @@ export default function ReceptionDeskPage() {
                   </label>
                   <select
                     value={paymentMode}
-                    onChange={(e) => setPaymentMode(e.target.value as any)}
+                    onChange={(e) => {
+                      if (e.target.value === 'CASH' || e.target.value === 'UPI') {
+                        setPaymentMode(e.target.value);
+                      }
+                    }}
                     className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-xs font-bold text-slate-800 focus:ring-2 focus:ring-blue-500"
                   >
                     <option value="CASH">Cash (₹{consultationFee})</option>

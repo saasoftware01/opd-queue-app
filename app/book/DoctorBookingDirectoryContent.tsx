@@ -152,6 +152,8 @@ function DoctorBookingDirectoryContent() {
 
   const [doctors, setDoctors] = useState<DoctorDirectoryItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [directoryRefreshKey, setDirectoryRefreshKey] = useState(0);
+  const [queueRefreshFailed, setQueueRefreshFailed] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   
   // Selected doctor for booking modal
@@ -188,7 +190,7 @@ function DoctorBookingDirectoryContent() {
 
     async function loadDirectory() {
       try {
-        setLoading(true);
+        if (directoryRefreshKey === 0) setLoading(true);
         const today = new Date().toISOString().split('T')[0];
 
         // Safe parallel queries using allSettled so one table never breaks the others
@@ -284,7 +286,121 @@ function DoctorBookingDirectoryContent() {
     return () => {
       isMounted = false;
     };
-  }, [urlDoctorId, urlClinicId]);
+  }, [urlDoctorId, urlClinicId, directoryRefreshKey]);
+
+  useEffect(() => {
+    let refreshTimeout: ReturnType<typeof setTimeout> | undefined;
+    let metricRefreshTimeout: ReturnType<typeof setTimeout> | undefined;
+    let isActive = true;
+    let isRefreshingMetrics = false;
+
+    async function refreshQueueMetrics() {
+      if (isRefreshingMetrics) return;
+      isRefreshingMetrics = true;
+
+      try {
+        const today = new Date().toISOString().split('T')[0];
+        const { data, error } = await supabase
+          .from('tickets')
+          .select('doctor_id, status, token_number, patient_name')
+          .gte('created_at', `${today}T00:00:00.000Z`);
+
+        if (error) throw error;
+        if (!isActive) return;
+        setQueueRefreshFailed(false);
+
+        const tickets = (data || []) as QueueMetricTicket[];
+        const metricsByDoctor = new Map<string, {
+          waitingCount: number;
+          currentToken: string | null;
+          currentPatientName: string | null;
+        }>();
+
+        tickets.forEach((ticket) => {
+          if (!ticket.doctor_id) return;
+          const metrics = metricsByDoctor.get(ticket.doctor_id) || {
+            waitingCount: 0,
+            currentToken: null,
+            currentPatientName: null,
+          };
+
+          if (ticket.status === 'waiting') metrics.waitingCount += 1;
+          if (ticket.status === 'in-consultation') {
+            metrics.currentToken = ticket.token_number;
+            metrics.currentPatientName = ticket.patient_name;
+          }
+          metricsByDoctor.set(ticket.doctor_id, metrics);
+        });
+
+        setDoctors((currentDoctors) => currentDoctors.map((doctor) => {
+          const metrics = metricsByDoctor.get(doctor.id);
+          return {
+            ...doctor,
+            waiting_count: metrics?.waitingCount || 0,
+            current_token: metrics?.currentToken || null,
+            current_patient_name: metrics?.currentPatientName || null,
+          };
+        }));
+      } catch (error: unknown) {
+        console.error('Booking directory queue refresh failed:', error);
+        if (isActive) setQueueRefreshFailed(true);
+      } finally {
+        isRefreshingMetrics = false;
+      }
+    }
+
+    const scheduleMetricsRefresh = () => {
+      if (metricRefreshTimeout) clearTimeout(metricRefreshTimeout);
+      metricRefreshTimeout = setTimeout(() => {
+        void refreshQueueMetrics();
+      }, 150);
+    };
+
+    const channel = supabase
+      .channel('booking-directory-live-updates')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'doctors' }, () => {
+        if (refreshTimeout) clearTimeout(refreshTimeout);
+        refreshTimeout = setTimeout(() => setDirectoryRefreshKey((key) => key + 1), 200);
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, () => {
+        scheduleMetricsRefresh();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'clinics' }, () => {
+        if (refreshTimeout) clearTimeout(refreshTimeout);
+        refreshTimeout = setTimeout(() => setDirectoryRefreshKey((key) => key + 1), 200);
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'departments' }, () => {
+        if (refreshTimeout) clearTimeout(refreshTimeout);
+        refreshTimeout = setTimeout(() => setDirectoryRefreshKey((key) => key + 1), 200);
+      })
+      .subscribe((status, error) => {
+        if ((status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') && error) {
+          console.error('Booking directory realtime subscription failed:', error);
+        }
+      });
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void refreshQueueMetrics();
+      }
+    };
+
+    void refreshQueueMetrics();
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    const metricsPoll = window.setInterval(() => {
+      void refreshQueueMetrics();
+    }, 5000);
+
+    return () => {
+      isActive = false;
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.clearInterval(metricsPoll);
+      if (refreshTimeout) clearTimeout(refreshTimeout);
+      if (metricRefreshTimeout) clearTimeout(metricRefreshTimeout);
+      void supabase.removeChannel(channel);
+    };
+  }, []);
 
   // 2. Realtime Live Queue Tracker for the confirmed ticket
   const confirmedTicketId = confirmedTicket?.id;
@@ -1006,6 +1122,12 @@ function DoctorBookingDirectoryContent() {
               <span className="text-xs text-slate-400">Live OPD Queue Enabled</span>
             </div>
 
+            {queueRefreshFailed && (
+              <p className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800" role="status">
+                Live queue data could not be refreshed. Retrying automatically.
+              </p>
+            )}
+
             {loading ? (
               <div className="py-20 text-center">
                 <div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto mb-3"></div>
@@ -1103,20 +1225,16 @@ function DoctorBookingDirectoryContent() {
                             </span>
                           </div>
                         </div>
-                      ) : doc.waiting_count ? (
-                        <div className="mt-3.5 flex items-center justify-between rounded-xl border border-slate-100 bg-slate-50 px-3 py-2 text-xs">
-                          <span className="flex items-center gap-1.5 font-medium text-slate-500">
-                            <Users className="h-3.5 w-3.5 text-blue-600" />
-                            <span>Waiting in line</span>
-                          </span>
-                          <span className="font-bold text-slate-900">{doc.waiting_count} patients</span>
-                        </div>
-                      ) : (
-                        <div className="mt-3.5 flex items-center gap-1.5 rounded-xl border border-slate-100 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-500">
-                          <Users className="h-3.5 w-3.5 text-slate-400" />
-                          <span>No patients waiting yet</span>
-                        </div>
-                      )}
+                      ) : null}
+                      <div className="mt-2 flex items-center justify-between rounded-xl border border-slate-100 bg-slate-50 px-3 py-2 text-xs">
+                        <span className="flex items-center gap-1.5 font-medium text-slate-500">
+                          <Users className="h-3.5 w-3.5 text-blue-600" />
+                          <span>Waiting in line</span>
+                        </span>
+                        <span className="font-bold text-slate-900">
+                          {doc.waiting_count || 0} {(doc.waiting_count || 0) === 1 ? 'patient' : 'patients'}
+                        </span>
+                      </div>
                     </div>
 
                     {/* Action Button */}
