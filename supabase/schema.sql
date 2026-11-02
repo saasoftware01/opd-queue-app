@@ -20,9 +20,21 @@ create table if not exists public.doctors (
   name text not null,
   department_id uuid references public.departments(id) on delete cascade not null,
   room_number text not null, -- e.g., 'Room 101'
+  opd_sessions jsonb not null default '[]'::jsonb,
+  weekly_off_days text[] not null default '{}',
+  opd_holiday_dates date[] not null default '{}',
   is_available boolean default true not null,
   created_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
+
+alter table public.doctors
+  add column if not exists opd_sessions jsonb not null default '[]'::jsonb;
+
+alter table public.doctors
+  add column if not exists weekly_off_days text[] not null default '{}';
+
+alter table public.doctors
+  add column if not exists opd_holiday_dates date[] not null default '{}';
 
 -- 4. Ticket Status enum & Tickets / Queue table
 create type public.ticket_status as enum ('waiting', 'in-consultation', 'completed', 'skipped', 'cancelled');

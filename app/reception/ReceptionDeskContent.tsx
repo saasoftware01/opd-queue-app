@@ -25,6 +25,9 @@ import {
   IndianRupee,
   LogOut,
   Phone,
+  UserRound,
+  Cake,
+  VenusAndMars,
   FileText,
   Download,
   Search,
@@ -32,12 +35,24 @@ import {
   ChevronRight
 } from 'lucide-react';
 import { Department, Doctor } from '@/lib/types';
+import {
+  formatCompactOpdSessions,
+  formatLegacyOpdTiming,
+  formatOpdSessions,
+  getOpdSessions,
+  OPD_TIME_OPTIONS,
+  OPD_SHIFTS,
+  OpdSession,
+} from '@/lib/opd-schedule';
 
 interface ExtendedDoctor extends Doctor {
   clinic_name?: string;
   consultation_fee?: number;
   opd_timing?: string;
   opd_shift?: string;
+  opd_sessions?: OpdSession[] | null;
+  weekly_off_days?: string[] | null;
+  opd_holiday_dates?: string[] | null;
   broadcast_message?: string | null;
   opd_status?: 'LIVE' | 'PAUSED';
 }
@@ -70,6 +85,7 @@ interface QueueTicket {
 }
 
 const HISTORY_PAGE_SIZE = 10;
+const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
 function getLocalDateString(date = new Date()): string {
   const localDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
@@ -119,11 +135,12 @@ export default function ReceptionDeskPage() {
   const [completionPaymentMode, setCompletionPaymentMode] = useState<'CASH' | 'UPI' | 'CARD' | 'OTHER' | 'NONE'>('CASH');
   const [completionError, setCompletionError] = useState('');
 
-  const [opdTiming, setOpdTiming] = useState<string>('10:00 AM - 01:00 PM');
-  const [opdShift, setOpdShift] = useState<string>('Morning');
   const [showTimingModal, setShowTimingModal] = useState<boolean>(false);
-  const [newTimingInput, setNewTimingInput] = useState<string>('');
-  const [newShiftInput, setNewShiftInput] = useState<string>('Morning');
+  const [timingError, setTimingError] = useState('');
+  const [newOpdSessions, setNewOpdSessions] = useState<OpdSession[]>([]);
+  const [newWeeklyOffDays, setNewWeeklyOffDays] = useState<string[]>([]);
+  const [newHolidayDates, setNewHolidayDates] = useState<string[]>([]);
+  const [newHolidayDate, setNewHolidayDate] = useState('');
   const [showLogoutModal, setShowLogoutModal] = useState<boolean>(false);
   const [ticketToReactivate, setTicketToReactivate] = useState<QueueTicket | null>(null);
 
@@ -179,8 +196,6 @@ export default function ReceptionDeskPage() {
           setSelectedDoctorId(targetDocId);
           const initialDoc = docs.find(d => d.id === targetDocId) || docs[0];
           setCurrentDoctor(initialDoc);
-          setOpdTiming(initialDoc.opd_timing || '10:00 AM - 01:00 PM');
-          setOpdShift(initialDoc.opd_shift || 'Morning');
         }
       } catch (err: any) {
         console.error('Initialization error:', err);
@@ -199,8 +214,6 @@ export default function ReceptionDeskPage() {
     const doc = doctors.find((d) => d.id === selectedDoctorId) || null;
     setCurrentDoctor(doc);
     if (doc) {
-      setOpdTiming(doc.opd_timing || '10:00 AM - 01:00 PM');
-      setOpdShift(doc.opd_shift || 'Morning');
       fetchDoctorQueue(doc.department_id, doc.id);
     }
   }, [selectedDoctorId, doctors]);
@@ -462,7 +475,8 @@ export default function ReceptionDeskPage() {
 
       if (error) throw error;
 
-      setSuccessMsg(`Completed token ${currentPatient.token_number}; ${formatCurrency(paidAmount)} recorded.`);
+      const recordedAmount = `₹${paidAmount.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
+      setSuccessMsg(`Consultation complete · ${currentPatient.token_number} · ${recordedAmount} recorded`);
       setShowCompleteModal(false);
       setCurrentPatient(null);
       fetchDoctorQueue(currentDoctor.department_id, currentDoctor.id);
@@ -656,26 +670,65 @@ export default function ReceptionDeskPage() {
   // ACTION 6: Update Doctor OPD Timing & Shift
   const handleUpdateTiming = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!currentDoctor || !newTimingInput) return;
+    if (!currentDoctor) return;
+    if (newOpdSessions.length === 0) {
+      setTimingError('Add at least one consultation session.');
+      return;
+    }
+    const invalidSession = newOpdSessions.find((session) =>
+      !session.start_time ||
+      !session.end_time ||
+      session.start_time === session.end_time ||
+      (session.start_time > session.end_time && session.shift !== 'Night')
+    );
+    if (invalidSession) {
+      setTimingError(`${invalidSession.shift} OPD end time must be later than its start time. Check that the selected AM/PM values are correct.`);
+      return;
+    }
+
+    setTimingError('');
+    const firstSession = newOpdSessions[0];
+    const legacyTiming = formatLegacyOpdTiming(newOpdSessions);
     setActionLoading(true);
 
     try {
       const { error } = await supabase
         .from('doctors')
         .update({
-          opd_timing: newTimingInput,
-          opd_shift: newShiftInput,
+          opd_timing: legacyTiming,
+          opd_shift: firstSession.shift,
+          opd_sessions: newOpdSessions,
+          weekly_off_days: newWeeklyOffDays,
+          opd_holiday_dates: newHolidayDates,
         })
         .eq('id', currentDoctor.id);
 
       if (error) throw error;
 
-      setOpdTiming(newTimingInput);
-      setOpdShift(newShiftInput);
+      setCurrentDoctor({
+        ...currentDoctor,
+        opd_timing: legacyTiming,
+        opd_shift: firstSession.shift,
+        opd_sessions: newOpdSessions,
+        weekly_off_days: newWeeklyOffDays,
+        opd_holiday_dates: newHolidayDates,
+      });
+      setDoctors((previousDoctors) => previousDoctors.map((doctor) =>
+        doctor.id === currentDoctor.id
+          ? {
+              ...doctor,
+              opd_timing: legacyTiming,
+              opd_shift: firstSession.shift,
+              opd_sessions: newOpdSessions,
+              weekly_off_days: newWeeklyOffDays,
+              opd_holiday_dates: newHolidayDates,
+            }
+          : doctor
+      ));
       setShowTimingModal(false);
-      setSuccessMsg(`Updated OPD timing for ${currentDoctor.name} to ${newTimingInput}`);
+      setSuccessMsg(`Updated OPD schedule for ${currentDoctor.name}.`);
     } catch (err: any) {
-      setErrorMsg(err.message || 'Failed to update timing');
+      setTimingError(err.message || 'Failed to update the OPD schedule.');
     } finally {
       setActionLoading(false);
     }
@@ -821,16 +874,29 @@ export default function ReceptionDeskPage() {
             {/* OPD Shift & Timing Badge */}
             <button
               onClick={() => {
-                setNewTimingInput(opdTiming);
-                setNewShiftInput(opdShift);
+                setTimingError('');
+                setNewOpdSessions(currentDoctor
+                  ? getOpdSessions(currentDoctor.opd_sessions, currentDoctor.opd_shift, currentDoctor.opd_timing)
+                  : []);
+                setNewWeeklyOffDays(currentDoctor?.weekly_off_days || []);
+                setNewHolidayDates(currentDoctor?.opd_holiday_dates || []);
+                setNewHolidayDate('');
                 setShowTimingModal(true);
               }}
-              className="flex items-center space-x-1.5 bg-blue-50 hover:bg-blue-100 border border-blue-200 text-blue-700 px-3 py-2 rounded-xl text-xs font-bold transition-colors cursor-pointer"
+              className="flex max-w-full items-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-bold text-blue-700 transition-colors hover:bg-blue-100 cursor-pointer"
               title="Click to edit doctor OPD schedule"
             >
-              <Clock className="w-3.5 h-3.5 text-blue-600" />
-              <span>{opdShift}: {opdTiming}</span>
-              <span className="text-[10px] underline ml-1 text-blue-500">Edit</span>
+              <Clock className="h-3.5 w-3.5 shrink-0 text-blue-600" />
+              <span className="min-w-0 max-w-[min(34rem,45vw)] text-left leading-4" title={currentDoctor
+                ? formatOpdSessions(getOpdSessions(currentDoctor.opd_sessions, currentDoctor.opd_shift, currentDoctor.opd_timing))
+                  || `${currentDoctor.opd_shift || 'Morning'}: ${currentDoctor.opd_timing || '10:00 AM - 01:00 PM'}`
+                : 'Set OPD hours'}>
+                {currentDoctor
+                  ? formatCompactOpdSessions(getOpdSessions(currentDoctor.opd_sessions, currentDoctor.opd_shift, currentDoctor.opd_timing))
+                    || `${currentDoctor.opd_shift || 'Morning'}: ${currentDoctor.opd_timing || '10:00 AM - 01:00 PM'}`
+                  : 'Set OPD hours'}
+              </span>
+              <span className="shrink-0 text-[10px] text-blue-500 underline">Edit</span>
             </button>
 
                         {/* Emergency Broadcast / Pause OPD Button */}
@@ -908,13 +974,13 @@ export default function ReceptionDeskPage() {
             <div>
               <div className="flex items-center justify-between pb-4 border-b border-slate-100">
                 <div className="flex items-center space-x-3">
-                  <span className="px-3 py-1 bg-emerald-100 text-emerald-800 text-xs font-black rounded-lg">
-                    {currentDoctor ? currentDoctor.room_number : 'Room 1'}
-                  </span>
                   <div>
                     <h2 className="text-lg font-bold text-slate-900">{currentDoctor?.name}</h2>
                     <p className="text-xs text-slate-500">Currently in consultation</p>
                   </div>
+                  <span className="px-3 py-1 bg-emerald-100 text-emerald-800 text-xs font-black rounded-lg">
+                    {currentDoctor ? currentDoctor.room_number : 'Room 1'}
+                  </span>
                 </div>
 
                 {currentPatient ? (
@@ -974,12 +1040,13 @@ export default function ReceptionDeskPage() {
 
                       {/* Patient Name & Metadata */}
                       <div>
-                        <h3 className="text-2xl font-black text-slate-900 tracking-tight">
+                        <h3 className="flex items-center gap-2 text-2xl font-black text-slate-900 tracking-tight">
+                          <UserRound className="h-5 w-5 text-slate-400" />
                           {currentPatient.patient_name}
                         </h3>
 
-                        {/* Metadata Row: Phone and Timestamp */}
-                        <div className="flex flex-wrap items-center gap-3 text-xs mt-1.5">
+                        {/* Patient details */}
+                        <div className="mt-2 grid grid-cols-1 gap-x-6 gap-y-2 text-xs sm:grid-cols-2">
                           <span className="flex items-center gap-1.5">
                             <Phone className="w-3.5 h-3.5 text-slate-400" />
                             <span className="font-semibold text-slate-900">
@@ -987,23 +1054,18 @@ export default function ReceptionDeskPage() {
                             </span>
                           </span>
 
-                          <span className="text-slate-300">•</span>
-
-                          <span className="font-semibold text-slate-900">
-                            Age: {currentPatient.patient_age ?? '—'}
+                          <span className="flex items-center gap-1.5 font-semibold text-slate-900">
+                            <Cake className="w-3.5 h-3.5 text-slate-400" />
+                            {currentPatient.patient_age ?? '—'}
                           </span>
 
-                          <span className="text-slate-300">•</span>
-
-                          <span className="font-semibold capitalize text-slate-900">
-                            Gender: {currentPatient.patient_gender?.replaceAll('-', ' ') || '—'}
+                          <span className="flex items-center gap-1.5 font-semibold capitalize text-slate-900">
+                            <VenusAndMars className="w-3.5 h-3.5 text-slate-400" />
+                            {currentPatient.patient_gender?.replaceAll('-', ' ') || '—'}
                           </span>
-                          
-                          <span className="text-slate-300">•</span>
-                          
+
                           <span className="flex items-center gap-1.5">
                             <Clock className="w-3.5 h-3.5 text-slate-400" />
-                            <span className="text-slate-500 font-medium">Called</span>
                             <span className="font-semibold text-slate-900">
                               {currentPatient.called_at
                                 ? new Date(currentPatient.called_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -1878,16 +1940,30 @@ export default function ReceptionDeskPage() {
             {/* MODAL: Update Doctor OPD Timing */}
       {showTimingModal && (
         <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-2xl border border-slate-200">
+          <div className="bg-white rounded-2xl max-w-sm w-full max-h-[90vh] overflow-y-auto p-5 sm:p-6 shadow-2xl border border-slate-200">
             <div className="flex justify-between items-center mb-4 pb-2 border-b border-slate-100">
               <h3 className="text-base font-black text-slate-900">Set OPD Schedule</h3>
               <button 
-                onClick={() => setShowTimingModal(false)} 
+                onClick={() => {
+                  setShowTimingModal(false);
+                  setTimingError('');
+                }}
+                aria-label="Close OPD schedule"
                 className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
+
+            {timingError && (
+              <div
+                role="alert"
+                className="mb-4 flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs font-semibold text-rose-700"
+              >
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-500" />
+                <span>{timingError}</span>
+              </div>
+            )}
 
             <form onSubmit={handleUpdateTiming} className="space-y-4">
               <div>
@@ -1903,40 +1979,206 @@ export default function ReceptionDeskPage() {
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase mb-1">
-                  Shift
-                </label>
-                <select
-                  value={newShiftInput}
-                  onChange={(e) => setNewShiftInput(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-xs font-bold text-slate-800"
-                >
-                  <option value="Morning">Morning OPD</option>
-                  <option value="Afternoon">Afternoon OPD</option>
-                  <option value="Evening">Evening OPD</option>
-                  <option value="Night">Night Emergency</option>
-                </select>
+                <div className="mb-2">
+                  <h4 className="text-xs font-bold text-slate-700 uppercase">Consultation Sessions</h4>
+                  <p className="mt-1 text-[11px] text-slate-400">Add a shift, then set its start and end time.</p>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  {OPD_SHIFTS.map((shift) => {
+                    const isAdded = newOpdSessions.some((session) => session.shift === shift);
+                    return (
+                      <button
+                        key={shift}
+                        type="button"
+                        disabled={isAdded}
+                        onClick={() => {
+                          setTimingError('');
+                          const defaultTimes: Record<typeof shift, [string, string]> = {
+                            Morning: ['09:00', '12:00'],
+                            Afternoon: ['13:00', '16:00'],
+                            Evening: ['17:00', '20:30'],
+                            Night: ['20:00', '23:00'],
+                          };
+                          const [start_time, end_time] = defaultTimes[shift];
+                          setNewOpdSessions((sessions) => [...sessions, { shift, start_time, end_time }]
+                            .sort((first, second) => OPD_SHIFTS.indexOf(first.shift) - OPD_SHIFTS.indexOf(second.shift)));
+                        }}
+                        className="rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-bold text-blue-700 hover:bg-blue-100 disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400"
+                      >
+                        {isAdded ? `${shift} added` : `+ Add ${shift}`}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="mt-3 space-y-3">
+                  {newOpdSessions.map((session, index) => (
+                    <div key={session.shift} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                      <div className="mb-2 flex items-center justify-between">
+                        <h5 className="text-xs font-bold text-slate-800">{session.shift} OPD</h5>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setTimingError('');
+                            setNewOpdSessions((sessions) => sessions.filter((item) => item.shift !== session.shift));
+                          }}
+                          aria-label={`Remove ${session.shift} session`}
+                          className="rounded-lg p-1 text-slate-400 hover:bg-white hover:text-rose-600"
+                        >
+                          <X className="h-4 w-4" />
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <label className="text-[11px] font-semibold text-slate-600">
+                          Start time
+                          <select
+                            required
+                            value={session.start_time}
+                            onChange={(event) => {
+                              setTimingError('');
+                              setNewOpdSessions((sessions) => sessions.map((item, itemIndex) =>
+                                itemIndex === index ? { ...item, start_time: event.target.value } : item
+                              ));
+                            }}
+                            className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs font-semibold text-slate-900 focus:ring-2 focus:ring-blue-500"
+                          >
+                            {OPD_TIME_OPTIONS.map(({ value, label }) => (
+                              <option key={value} value={value}>{label}</option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="text-[11px] font-semibold text-slate-600">
+                          End time
+                          <select
+                            required
+                            value={session.end_time}
+                            onChange={(event) => {
+                              setTimingError('');
+                              setNewOpdSessions((sessions) => sessions.map((item, itemIndex) =>
+                                itemIndex === index ? { ...item, end_time: event.target.value } : item
+                              ));
+                            }}
+                            className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs font-semibold text-slate-900 focus:ring-2 focus:ring-blue-500"
+                          >
+                            {OPD_TIME_OPTIONS.map(({ value, label }) => (
+                              <option key={value} value={value}>{label}</option>
+                            ))}
+                          </select>
+                        </label>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase mb-1">
-                  Consultation Hours
+                <label htmlFor="weekly-off-day" className="block text-xs font-bold text-slate-700 uppercase mb-1">
+                  Weekly Off Days
                 </label>
-                <input
-                  type="text"
-                  required
-                  value={newTimingInput}
-                  onChange={(e) => setNewTimingInput(e.target.value)}
-                  placeholder="e.g. 10:30 AM - 02:00 PM"
-                  className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-xs font-semibold text-slate-900 focus:ring-2 focus:ring-blue-500"
-                />
-                <p className="text-[11px] text-slate-400 mt-1">Receptionist can modify this if doctor is delayed.</p>
+                <select
+                  id="weekly-off-day"
+                  value=""
+                  onChange={(event) => {
+                    setTimingError('');
+                    const selectedDay = event.target.value;
+                    if (selectedDay && !newWeeklyOffDays.includes(selectedDay)) {
+                      setNewWeeklyOffDays((days) => [...days, selectedDay].sort(
+                        (firstDay, secondDay) => WEEKDAYS.indexOf(firstDay) - WEEKDAYS.indexOf(secondDay)
+                      ));
+                    }
+                  }}
+                  className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2.5 text-xs font-semibold text-slate-900 focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="">Select a day to add</option>
+                  {WEEKDAYS.filter((day) => !newWeeklyOffDays.includes(day)).map((day) => (
+                    <option key={day} value={day}>{day}</option>
+                  ))}
+                </select>
+                {newWeeklyOffDays.length > 0 ? (
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {newWeeklyOffDays.map((day) => (
+                      <button
+                        key={day}
+                        type="button"
+                        onClick={() => {
+                          setTimingError('');
+                          setNewWeeklyOffDays((days) => days.filter((offDay) => offDay !== day));
+                        }}
+                        aria-label={`Remove ${day} as a weekly off day`}
+                        className="rounded-lg border border-slate-200 bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-200"
+                      >
+                        {day} ×
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-1 text-[11px] text-slate-400">No weekly off days selected.</p>
+                )}
+              </div>
+
+              <div>
+                <label htmlFor="opd-holiday-date" className="block text-xs font-bold text-slate-700 uppercase mb-1">
+                  Holidays
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    id="opd-holiday-date"
+                    type="date"
+                    min={getLocalDateString()}
+                    value={newHolidayDate}
+                    onChange={(event) => setNewHolidayDate(event.target.value)}
+                    className="min-w-0 flex-1 bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-xs font-semibold text-slate-900 focus:ring-2 focus:ring-blue-500"
+                  />
+                  <button
+                    type="button"
+                    disabled={
+                      !newHolidayDate ||
+                      newHolidayDate < getLocalDateString() ||
+                      newHolidayDates.includes(newHolidayDate)
+                    }
+                    onClick={() => {
+                      if (
+                        !newHolidayDate ||
+                        newHolidayDate < getLocalDateString() ||
+                        newHolidayDates.includes(newHolidayDate)
+                      ) return;
+                      setTimingError('');
+                      setNewHolidayDates((dates) => [...dates, newHolidayDate].sort());
+                      setNewHolidayDate('');
+                    }}
+                    className="rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-bold text-blue-700 hover:bg-blue-100 disabled:opacity-50"
+                  >
+                    Add date
+                  </button>
+                </div>
+                {newHolidayDates.length > 0 ? (
+                  <div className="mt-2 flex max-h-24 flex-wrap gap-2 overflow-y-auto">
+                    {newHolidayDates.map((holidayDate) => (
+                      <button
+                        key={holidayDate}
+                        type="button"
+                        onClick={() => {
+                          setTimingError('');
+                          setNewHolidayDates((dates) => dates.filter((date) => date !== holidayDate));
+                        }}
+                        aria-label={`Remove holiday on ${new Date(`${holidayDate}T00:00:00`).toLocaleDateString()}`}
+                        className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-800 hover:bg-amber-100"
+                      >
+                        {new Date(`${holidayDate}T00:00:00`).toLocaleDateString()} ×
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-1 text-[11px] text-slate-400">No additional holidays scheduled.</p>
+                )}
               </div>
 
               <div className="flex justify-end gap-2 pt-2">
                 <button
                   type="button"
-                  onClick={() => setShowTimingModal(false)}
+                  onClick={() => {
+                    setShowTimingModal(false);
+                    setTimingError('');
+                  }}
                   className="px-3 py-2 rounded-xl border border-slate-200 text-xs font-bold text-slate-600 hover:bg-slate-50 cursor-pointer"
                 >
                   Cancel
@@ -2017,6 +2259,47 @@ export default function ReceptionDeskPage() {
                   {actionLoading ? 'Pausing...' : 'Confirm & Pause OPD'}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showLogoutModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-xs">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="logout-confirmation-title"
+            className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl"
+          >
+            <div className="flex flex-col items-center text-center">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-50 text-blue-600">
+                <LogOut className="h-5 w-5" />
+              </div>
+              <div className="mt-4">
+                <h3 id="logout-confirmation-title" className="text-base font-bold text-slate-900">
+                  Ready to leave the reception desk?
+                </h3>
+                <p className="mt-2 text-xs leading-5 text-slate-500">
+                  You can sign back in anytime to manage the patient queue.
+                </p>
+              </div>
+            </div>
+            <div className="mt-6 flex justify-center gap-3">
+              <button
+                type="button"
+                onClick={() => setShowLogoutModal(false)}
+                className="cursor-pointer rounded-xl border border-slate-300 px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmLogout()}
+                className="cursor-pointer rounded-xl bg-blue-600 px-4 py-2.5 text-xs font-bold text-white shadow-md hover:bg-blue-700"
+              >
+                Yes, Log Out
+              </button>
             </div>
           </div>
         </div>

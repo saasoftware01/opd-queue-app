@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useMemo, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { supabase } from '@/lib/supabase/client';
+import { formatOpdSessions, getOpdSessions, OpdSession } from '@/lib/opd-schedule';
 import { 
   Search, 
   Stethoscope, 
@@ -40,6 +41,9 @@ interface DoctorDirectoryRecord {
   room_number: string | null;
   opd_shift: string | null;
   opd_timing: string | null;
+  opd_sessions?: OpdSession[] | null;
+  weekly_off_days?: string[] | null;
+  opd_holiday_dates?: string[] | null;
   clinic_id: string | null;
   clinic_name: string | null;
   department_id: string | null;
@@ -71,6 +75,9 @@ interface DoctorDirectoryItem {
   room_number: string;
   opd_shift: string;
   opd_timing: string;
+  opd_sessions: OpdSession[];
+  weekly_off_days: string[];
+  opd_holiday_dates: string[];
   clinic_id: string;
   clinic_name: string;
   booking_fee: number;
@@ -102,6 +109,26 @@ function getErrorMessage(error: unknown, fallback: string): string {
     return error.message;
   }
   return fallback;
+}
+
+const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+function getLocalDateString(date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function getDoctorClosureReason(
+  doctor: Pick<DoctorDirectoryItem, 'weekly_off_days' | 'opd_holiday_dates'>,
+  date = new Date()
+): string | null {
+  const dateString = getLocalDateString(date);
+  if (doctor.opd_holiday_dates.includes(dateString)) return 'Holiday';
+
+  const weekday = WEEKDAY_NAMES[date.getDay()];
+  return doctor.weekly_off_days.includes(weekday) ? `${weekday} off` : null;
 }
 
 function DoctorBookingDirectoryContent() {
@@ -191,6 +218,9 @@ function DoctorBookingDirectoryContent() {
             room_number: doc.room_number || 'Room 1',
             opd_shift: doc.opd_shift || 'Morning',
             opd_timing: doc.opd_timing || '10:00 AM - 01:30 PM',
+            opd_sessions: getOpdSessions(doc.opd_sessions, doc.opd_shift, doc.opd_timing),
+            weekly_off_days: doc.weekly_off_days || [],
+            opd_holiday_dates: doc.opd_holiday_dates || [],
             clinic_id: doc.clinic_id || clinic?.id || '',
             clinic_name: clinic?.name || doc.clinic_name || 'Care Clinic',
             booking_fee: Number(clinic?.booking_fee) || 0,
@@ -364,6 +394,22 @@ function DoctorBookingDirectoryContent() {
       }
       if (!patientGender) {
         throw new Error('Please select the patient gender.');
+      }
+
+      const { data: currentSchedule, error: scheduleError } = await supabase
+        .from('doctors')
+        .select('weekly_off_days, opd_holiday_dates')
+        .eq('id', selectedDoctor.id)
+        .single();
+
+      if (scheduleError) throw scheduleError;
+
+      const closureReason = getDoctorClosureReason({
+        weekly_off_days: currentSchedule.weekly_off_days || [],
+        opd_holiday_dates: currentSchedule.opd_holiday_dates || [],
+      });
+      if (closureReason) {
+        throw new Error(`Bookings are unavailable for this doctor today (${closureReason}).`);
       }
 
       const today = new Date().toISOString().split('T')[0];
@@ -883,10 +929,27 @@ function DoctorBookingDirectoryContent() {
                         <span className="truncate">{doc.clinic_name} · {doc.room_number}</span>
                       </div>
 
-                      <div className="mt-2.5 flex items-center gap-1.5 text-[11px] font-semibold text-slate-400">
+                      <div className="mt-2.5 flex items-start gap-1.5 text-[11px] font-semibold text-slate-400">
                         <Clock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                        <span>{doc.opd_timing} ({doc.opd_shift})</span>
+                        <div className="flex flex-wrap gap-1.5">
+                          {doc.opd_sessions.length > 0
+                            ? doc.opd_sessions.map((session) => (
+                                <span
+                                  key={session.shift}
+                                  className="rounded-md bg-slate-50 px-2 py-1 text-slate-600"
+                                >
+                                  {formatOpdSessions([session])}
+                                </span>
+                              ))
+                            : <span>{doc.opd_timing} ({doc.opd_shift})</span>}
+                        </div>
                       </div>
+
+                      {getDoctorClosureReason(doc) && (
+                        <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800">
+                          Closed today: {getDoctorClosureReason(doc)}
+                        </div>
+                      )}
 
                       {doc.opd_status === 'PAUSED' && (
                         <div className="mt-3 p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-xs font-bold text-amber-800 flex items-center gap-2">
@@ -910,14 +973,15 @@ function DoctorBookingDirectoryContent() {
                       <span className="text-[11px] text-slate-400 font-medium">Instant Token</span>
                       <button
                         type="button"
+                        disabled={Boolean(getDoctorClosureReason(doc))}
                         onClick={() => {
                           setSelectedDoctor(doc);
                           setErrorMsg('');
                         }}
-                        className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 active:scale-95 text-white text-xs font-bold transition-all shadow-xs cursor-pointer flex items-center gap-1.5"
+                        className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 active:scale-95 text-white text-xs font-bold transition-all shadow-xs cursor-pointer flex items-center gap-1.5 disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-600 disabled:shadow-none"
                       >
-                        <span>Book Token</span>
-                        <ArrowRight className="w-3.5 h-3.5" />
+                        <span>{getDoctorClosureReason(doc) ? 'Closed Today' : 'Book Token'}</span>
+                        {!getDoctorClosureReason(doc) && <ArrowRight className="w-3.5 h-3.5" />}
                       </button>
                     </div>
                   </div>
