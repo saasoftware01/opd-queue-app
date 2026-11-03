@@ -818,7 +818,7 @@ export default function ReceptionDeskPage() {
     <div className="min-h-screen bg-slate-100 flex flex-col justify-between">
       {/* Top Header */}
       <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-xs">
-        <div className="max-w-7xl mx-auto px-4 py-3 sm:px-6 lg:px-8 lg:h-20 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="max-w-7xl mx-auto px-4 py-3 sm:px-6 lg:px-8 min-h-20 flex flex-col gap-3 lg:h-20 lg:flex-row lg:items-center lg:justify-between lg:py-0">
           <div className="flex min-w-0 items-center space-x-3">
             
             <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center text-white shadow-md">
@@ -2262,7 +2262,6 @@ export default function ReceptionDeskPage() {
           </div>
         </div>
       )}
-
       {showLogoutModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-xs">
           <div
