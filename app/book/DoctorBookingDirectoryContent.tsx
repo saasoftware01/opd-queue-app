@@ -1,7 +1,8 @@
 'use client';
 
-import React, { useState, useEffect, useMemo, Suspense } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
+import type { User as SupabaseUser } from '@supabase/supabase-js';
 import { supabase } from '@/lib/supabase/client';
 import { formatOpdSessions, getOpdSessions, OpdSession } from '@/lib/opd-schedule';
 import { 
@@ -22,7 +23,8 @@ import {
   Users,
   Compass,
   Volume2,
-  Star
+  Star,
+  LogOut
 } from 'lucide-react';
 
 interface ClinicDirectoryRecord {
@@ -166,6 +168,126 @@ function DoctorBookingDirectoryContent() {
   const [patientGender, setPatientGender] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+
+  // Patient authentication
+  const [currentUser, setCurrentUser] = useState<SupabaseUser | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [authTab, setAuthTab] = useState<'login' | 'register'>('login');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState('');
+  const [authNotice, setAuthNotice] = useState('');
+
+  const applyAuthenticatedUser = useCallback((user: SupabaseUser | null) => {
+    setCurrentUser(user);
+    if (!user) return;
+
+    const fullName = user.user_metadata?.full_name;
+    const userPhone = user.user_metadata?.phone;
+    if (typeof fullName === 'string') setPatientName(fullName);
+    if (typeof userPhone === 'string') setPhone(userPhone);
+    setShowAuthModal(false);
+  }, []);
+
+  useEffect(() => {
+    let isMounted = true;
+    let receivedAuthEvent = false;
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      receivedAuthEvent = true;
+      if (!isMounted) return;
+      applyAuthenticatedUser(session?.user ?? null);
+      setAuthReady(true);
+    });
+
+    supabase.auth.getSession().then(({ data: { session }, error }) => {
+      if (error) throw error;
+      if (!isMounted) return;
+      if (!receivedAuthEvent) applyAuthenticatedUser(session?.user ?? null);
+      setAuthReady(true);
+    }).catch((err: unknown) => {
+      console.error('Failed to restore patient session:', err);
+      if (!isMounted) return;
+      setAuthError(getErrorMessage(err, 'Could not restore your sign-in session.'));
+      setAuthReady(true);
+    });
+
+    return () => {
+      isMounted = false;
+      subscription.unsubscribe();
+    };
+  }, [applyAuthenticatedUser]);
+
+  const handlePatientAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthLoading(true);
+    setAuthError('');
+    setAuthNotice('');
+
+    try {
+      if (authTab === 'login') {
+        const { data, error } = await supabase.auth.signInWithPassword({
+          email: authEmail.trim(),
+          password: authPassword,
+        });
+        if (error) throw error;
+        if (!data.user) throw new Error('Unable to sign in. Please try again.');
+        applyAuthenticatedUser(data.user);
+      } else {
+        const cleanPhone = phone.trim().replace(/\D/g, '');
+        if (!patientName.trim()) throw new Error('Please enter your full name.');
+        if (cleanPhone.length !== 10) throw new Error('Please enter a valid 10-digit mobile number.');
+
+        const { data, error } = await supabase.auth.signUp({
+          email: authEmail.trim(),
+          password: authPassword,
+          options: {
+            data: {
+              full_name: patientName.trim(),
+              phone: cleanPhone,
+            },
+          },
+        });
+        if (error) throw error;
+        if (!data.user) throw new Error('Unable to create your account. Please try again.');
+        if (data.user.identities?.length === 0) {
+          throw new Error('This email is already registered. Please sign in instead.');
+        }
+
+        if (!data.session) {
+          setAuthPassword('');
+          setAuthNotice('Account created. Check your email to confirm your account, then sign in to continue.');
+          return;
+        }
+        applyAuthenticatedUser(data.user);
+      }
+
+      setAuthEmail('');
+      setAuthPassword('');
+      setShowAuthModal(false);
+    } catch (err: unknown) {
+      setAuthError(getErrorMessage(err, 'Authentication failed. Please check your details.'));
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handlePatientLogout = async () => {
+    setAuthLoading(true);
+    setAuthError('');
+    try {
+      const { error } = await supabase.auth.signOut();
+      if (error) throw error;
+      applyAuthenticatedUser(null);
+    } catch (err: unknown) {
+      console.error('Patient sign-out failed:', err);
+      setAuthError(getErrorMessage(err, 'Could not sign out. Please try again.'));
+    } finally {
+      setAuthLoading(false);
+    }
+  };
   
   // Confirmed slip / Active tracked ticket
   const [confirmedTicket, setConfirmedTicket] = useState<ConfirmedTicket | null>(null);
@@ -527,6 +649,10 @@ function DoctorBookingDirectoryContent() {
   const handleBooking = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedDoctor) return;
+    if (!currentUser) {
+      setShowAuthModal(true);
+      return;
+    }
 
     setSubmitting(true);
     setErrorMsg('');
@@ -756,36 +882,51 @@ function DoctorBookingDirectoryContent() {
               </div>
             </div>
 
-            {/* TAB SELECTOR */}
-            <div className="flex bg-slate-900 p-1 rounded-2xl border border-slate-800 self-start sm:self-auto">
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveTab('DIRECTORY');
-                  setConfirmedTicket(null);
-                }}
-                className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                  activeTab === 'DIRECTORY'
-                    ? 'bg-blue-600 text-white shadow-sm'
-                    : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                Book New Token
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveTab('TRACKER');
-                  setConfirmedTicket(null);
-                }}
-                className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                  activeTab === 'TRACKER'
-                    ? 'bg-blue-600 text-white shadow-sm'
-                    : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                Track My Turn
-              </button>
+            <div className="flex items-center gap-3 self-start sm:self-auto">
+              {/* TAB SELECTOR */}
+              <div className="flex bg-slate-900 p-1 rounded-2xl border border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('DIRECTORY');
+                    setConfirmedTicket(null);
+                  }}
+                  className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                    activeTab === 'DIRECTORY'
+                      ? 'bg-blue-600 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Book New Token
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('TRACKER');
+                    setConfirmedTicket(null);
+                  }}
+                  className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                    activeTab === 'TRACKER'
+                      ? 'bg-blue-600 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Track My Turn
+                </button>
+              </div>
+
+              {currentUser && (
+                <button
+                  type="button"
+                  onClick={handlePatientLogout}
+                  disabled={authLoading}
+                  className="flex items-center gap-1.5 bg-slate-900 hover:bg-rose-950/50 text-slate-300 hover:text-rose-400 border border-slate-800 hover:border-rose-900/50 px-3.5 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer disabled:opacity-50"
+                  title="Log out of patient session"
+                >
+                  <LogOut className="h-3.5 w-3.5" />
+                  <span>{authLoading ? 'Signing out...' : 'Log Out'}</span>
+                </button>
+              )}
             </div>
           </div>
 
@@ -1246,6 +1387,9 @@ function DoctorBookingDirectoryContent() {
                         onClick={() => {
                           setSelectedDoctor(doc);
                           setErrorMsg('');
+                          setAuthError('');
+                          setAuthNotice('');
+                          if (authReady && !currentUser) setShowAuthModal(true);
                         }}
                         className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 active:scale-95 text-white text-xs font-bold transition-all shadow-xs cursor-pointer flex items-center gap-1.5 disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-600 disabled:shadow-none"
                       >
@@ -1262,7 +1406,7 @@ function DoctorBookingDirectoryContent() {
       </main>
 
       {/* QUICK BOOKING MODAL */}
-      {selectedDoctor && (
+      {selectedDoctor && currentUser && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 backdrop-blur-xs p-4 animate-in fade-in duration-150">
           <div className="bg-white rounded-3xl p-6 sm:p-8 max-w-md w-full shadow-2xl border border-slate-200">
             
@@ -1398,6 +1542,162 @@ function DoctorBookingDirectoryContent() {
               </span>
             </div>
 
+          </div>
+        </div>
+      )}
+
+      {(showAuthModal || (authReady && Boolean(selectedDoctor) && !currentUser)) && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 backdrop-blur-xs p-4 animate-in fade-in duration-150">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="patient-auth-title"
+            className="bg-white rounded-3xl p-6 sm:p-8 max-w-md w-full shadow-2xl border border-slate-200"
+          >
+            <div className="flex items-center justify-between mb-6 pb-3 border-b border-slate-100">
+              <div>
+                <h3 id="patient-auth-title" className="text-lg font-black text-slate-900">
+                  {authTab === 'login' ? 'Patient Login' : 'Create Patient Account'}
+                </h3>
+                <p className="text-xs text-slate-500">Sign in to book tokens and track live queues</p>
+              </div>
+              <button
+                type="button"
+                aria-label="Close patient sign-in"
+                onClick={() => {
+                  setShowAuthModal(false);
+                  setSelectedDoctor(null);
+                  setAuthPassword('');
+                  setAuthError('');
+                  setAuthNotice('');
+                }}
+                className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
+              >
+                <XCircle className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2 bg-slate-100 p-1 rounded-2xl mb-5">
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthTab('login');
+                  setAuthError('');
+                  setAuthNotice('');
+                }}
+                className={`py-2 text-xs font-bold rounded-xl transition-all cursor-pointer ${
+                  authTab === 'login' ? 'bg-white text-blue-600 shadow-xs' : 'text-slate-500'
+                }`}
+              >
+                Existing User
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthTab('register');
+                  setAuthError('');
+                  setAuthNotice('');
+                }}
+                className={`py-2 text-xs font-bold rounded-xl transition-all cursor-pointer ${
+                  authTab === 'register' ? 'bg-white text-blue-600 shadow-xs' : 'text-slate-500'
+                }`}
+              >
+                New Register
+              </button>
+            </div>
+
+            {authError && (
+              <div role="alert" className="mb-4 p-3 rounded-2xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-semibold">
+                {authError}
+              </div>
+            )}
+            {authNotice && (
+              <div role="status" className="mb-4 p-3 rounded-2xl bg-blue-50 border border-blue-200 text-blue-700 text-xs font-semibold">
+                {authNotice}
+              </div>
+            )}
+
+            <form onSubmit={handlePatientAuth} className="space-y-4">
+              {authTab === 'register' && (
+                <>
+                  <div>
+                    <label htmlFor="patient-auth-name" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                      Full Name *
+                    </label>
+                    <input
+                      id="patient-auth-name"
+                      type="text"
+                      required
+                      autoComplete="name"
+                      value={patientName}
+                      onChange={(e) => setPatientName(e.target.value)}
+                      placeholder="Enter your full name"
+                      className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-600 focus:outline-hidden"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="patient-auth-phone" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                      10-Digit Mobile Number *
+                    </label>
+                    <input
+                      id="patient-auth-phone"
+                      type="tel"
+                      required
+                      maxLength={10}
+                      autoComplete="tel"
+                      value={phone}
+                      onChange={(e) => setPhone(e.target.value)}
+                      placeholder="e.g. 9876543210"
+                      className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-600 focus:outline-hidden"
+                    />
+                  </div>
+                </>
+              )}
+
+              <div>
+                <label htmlFor="patient-auth-email" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                  Email Address *
+                </label>
+                <input
+                  id="patient-auth-email"
+                  type="email"
+                  required
+                  autoComplete="email"
+                  value={authEmail}
+                  onChange={(e) => setAuthEmail(e.target.value)}
+                  placeholder="patient@example.com"
+                  className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-600 focus:outline-hidden"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="patient-auth-password" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                  Password *
+                </label>
+                <input
+                  id="patient-auth-password"
+                  type="password"
+                  required
+                  autoComplete={authTab === 'login' ? 'current-password' : 'new-password'}
+                  value={authPassword}
+                  onChange={(e) => setAuthPassword(e.target.value)}
+                  placeholder="Enter your password"
+                  className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-600 focus:outline-hidden"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={authLoading}
+                className="w-full mt-2 py-3.5 rounded-xl shadow-md text-xs font-black text-white bg-blue-600 hover:bg-blue-700 active:scale-95 disabled:opacity-50 transition-all cursor-pointer"
+              >
+                {authLoading
+                  ? 'Processing...'
+                  : authTab === 'login'
+                    ? 'Sign In & Continue Booking'
+                    : 'Register & Continue'}
+              </button>
+            </form>
           </div>
         </div>
       )}
