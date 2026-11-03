@@ -24,7 +24,10 @@ import {
   Compass,
   Volume2,
   Star,
-  LogOut
+  LogOut,
+  ChevronDown,
+  History as HistoryIcon,
+  UserRound
 } from 'lucide-react';
 
 interface ClinicDirectoryRecord {
@@ -116,6 +119,15 @@ interface ConfirmedTicket {
   rating?: number | null;
 }
 
+interface PatientHistoryTicket {
+  id: string;
+  token_number: string;
+  patient_name: string;
+  status: string;
+  created_at: string;
+  doctor_id: string | null;
+}
+
 function getErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error) return error.message;
   if (typeof error === 'object' && error !== null && 'message' in error && typeof error.message === 'string') {
@@ -181,10 +193,19 @@ function DoctorBookingDirectoryContent() {
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState('');
   const [authNotice, setAuthNotice] = useState('');
+  const [showProfileMenu, setShowProfileMenu] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [historyTickets, setHistoryTickets] = useState<PatientHistoryTicket[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState('');
 
   const applyAuthenticatedUser = useCallback((user: SupabaseUser | null) => {
     setCurrentUser(user);
-    if (!user) return;
+    if (!user) {
+      setActiveTab('DIRECTORY');
+      setShowProfileMenu(false);
+      return;
+    }
 
     const fullName = user.user_metadata?.full_name;
     const userPhone = user.user_metadata?.phone;
@@ -399,11 +420,43 @@ function DoctorBookingDirectoryContent() {
       const { error } = await patientSupabase.auth.signOut({ scope: 'local' });
       if (error) throw error;
       applyAuthenticatedUser(null);
+      setShowHistory(false);
     } catch (err: unknown) {
       console.error('Patient sign-out failed:', err);
       setAuthError(getErrorMessage(err, 'Could not sign out. Please try again.'));
     } finally {
       setAuthLoading(false);
+    }
+  };
+
+  const handleOpenHistory = async () => {
+    setShowProfileMenu(false);
+    setShowHistory(true);
+    setHistoryLoading(true);
+    setHistoryError('');
+
+    try {
+      const userPhone = currentUser?.user_metadata?.phone;
+      if (typeof userPhone !== 'string' || userPhone.replace(/\D/g, '').length < 10) {
+        setHistoryTickets([]);
+        setHistoryError('Your account does not have a registered mobile number for history lookup.');
+        return;
+      }
+
+      const { data, error } = await patientSupabase
+        .from('tickets')
+        .select('id, token_number, patient_name, status, created_at, doctor_id')
+        .eq('phone_number', userPhone.replace(/\D/g, ''))
+        .order('created_at', { ascending: false })
+        .limit(25);
+
+      if (error) throw error;
+      setHistoryTickets((data || []) as PatientHistoryTicket[]);
+    } catch (error: unknown) {
+      console.error('Patient history lookup failed:', error);
+      setHistoryError(getErrorMessage(error, 'Could not load your booking history.'));
+    } finally {
+      setHistoryLoading(false);
     }
   };
   
@@ -989,68 +1042,139 @@ function DoctorBookingDirectoryContent() {
       {/* Header Banner */}
       <header className="bg-slate-950 text-white border-b border-slate-800">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 py-8">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <div className="w-11 h-11 rounded-2xl bg-blue-600 flex items-center justify-center text-white shadow-lg shadow-blue-500/25">
+          <div className="flex flex-col gap-5">
+            <div className="flex min-w-0 items-center justify-between gap-2 sm:gap-4">
+            <div className="flex min-w-0 items-center gap-2.5 sm:gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-blue-600 text-white shadow-lg shadow-blue-500/25 sm:h-11 sm:w-11">
                 <Stethoscope className="w-6 h-6" />
               </div>
-              <div>
-                <h1 className="text-xl font-black tracking-tight">MediQueue Patient Portal</h1>
-                <p className="text-xs text-slate-400">Quick token booking & real-time queue tracker</p>
+              <div className="min-w-0">
+                <h1 className="truncate text-base font-black tracking-tight sm:text-xl">MediQueue Patient Portal</h1>
+                <p className="truncate text-[10px] text-slate-400 sm:text-xs">Quick token booking & real-time queue tracker</p>
               </div>
             </div>
 
-            <div className="flex items-center gap-3 self-start sm:self-auto">
-              {/* TAB SELECTOR */}
-              <div className="flex bg-slate-900 p-1 rounded-2xl border border-slate-800">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveTab('DIRECTORY');
-                    setConfirmedTicket(null);
-                  }}
-                  className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                    activeTab === 'DIRECTORY'
-                      ? 'bg-blue-600 text-white shadow-sm'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  Book New Token
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveTab('TRACKER');
-                    setConfirmedTicket(null);
-                  }}
-                  className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                    activeTab === 'TRACKER'
-                      ? 'bg-blue-600 text-white shadow-sm'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  Track My Turn
-                </button>
-              </div>
+            <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab('DIRECTORY');
+                  setConfirmedTicket(null);
+                }}
+                className="rounded-xl bg-blue-600 px-2.5 py-2 text-[10px] font-bold text-white shadow-lg shadow-blue-900/20 transition-all hover:bg-blue-500 hover:shadow-blue-900/30 cursor-pointer sm:px-4 sm:py-2.5 sm:text-xs"
+              >
+                <span className="sm:hidden">Book</span>
+                <span className="hidden sm:inline">Book New Token</span>
+              </button>
 
               {currentUser && (
+                <div className="relative">
+                  <button
+                    type="button"
+                    aria-expanded={showProfileMenu}
+                    onClick={() => setShowProfileMenu((open) => !open)}
+                    className="group flex items-center gap-2 rounded-2xl border border-slate-700 bg-slate-900 px-2.5 py-2 text-left shadow-lg shadow-black/10 transition-all hover:border-blue-400 hover:bg-slate-800 cursor-pointer"
+                  >
+                    <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-blue-400 to-indigo-500 text-xs font-black text-white shadow-inner">
+                      {(String(currentUser.user_metadata?.full_name || currentUser.email || 'P').trim().charAt(0) || 'P').toUpperCase()}
+                    </span>
+                    <span className="hidden max-w-28 truncate text-xs font-bold text-white sm:block">
+                      {String(currentUser.user_metadata?.full_name || currentUser.email || 'Patient')}
+                    </span>
+                    <ChevronDown className={`h-3.5 w-3.5 text-slate-400 transition-transform group-hover:text-white ${showProfileMenu ? 'rotate-180' : ''}`} />
+                  </button>
+
+                  {showProfileMenu && (
+                    <div className="absolute right-0 top-[calc(100%+0.75rem)] z-40 w-64 overflow-hidden rounded-3xl border border-slate-200 bg-white text-slate-900 shadow-2xl shadow-slate-950/20">
+                      <div className="border-b border-slate-800 bg-slate-950 px-4 py-4 text-white">
+                        <div className="flex items-center gap-3">
+                          <span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-slate-800 text-base font-black text-white ring-1 ring-slate-700">
+                            {(String(currentUser.user_metadata?.full_name || currentUser.email || 'P').trim().charAt(0) || 'P').toUpperCase()}
+                          </span>
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-black">{String(currentUser.user_metadata?.full_name || 'Patient')}</p>
+                            <p className="truncate text-[11px] text-slate-400">{currentUser.email}</p>
+                          </div>
+                        </div>
+                        <p className="mt-3 text-[10px] font-bold uppercase tracking-[0.16em] text-slate-400">Patient account</p>
+                      </div>
+                      <div className="space-y-1 p-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setActiveTab('DIRECTORY');
+                          setConfirmedTicket(null);
+                          setShowProfileMenu(false);
+                        }}
+                        className="flex w-full items-center gap-3 rounded-2xl px-3 py-3 text-left text-xs font-bold text-slate-600 transition-colors hover:bg-blue-50 hover:text-blue-700 cursor-pointer"
+                      >
+                        <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-slate-100 text-slate-500">
+                          <Stethoscope className="h-4 w-4" />
+                        </span>
+                        <span>Book New Token</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setActiveTab('TRACKER');
+                          setConfirmedTicket(null);
+                          setShowProfileMenu(false);
+                        }}
+                        className="flex w-full items-center gap-3 rounded-2xl px-3 py-3 text-left text-xs font-bold text-slate-600 transition-colors hover:bg-blue-50 hover:text-blue-700 cursor-pointer"
+                      >
+                        <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-blue-50 text-blue-600">
+                          <Compass className="h-4 w-4" />
+                        </span>
+                        <span>Track My Turn</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleOpenHistory}
+                        className="flex w-full items-center gap-3 rounded-2xl px-3 py-3 text-left text-xs font-bold text-slate-600 transition-colors hover:bg-blue-50 hover:text-blue-700 cursor-pointer"
+                      >
+                        <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-violet-50 text-violet-600">
+                          <HistoryIcon className="h-4 w-4" />
+                        </span>
+                        <span>Booking History</span>
+                      </button>
+                      <div className="my-1 border-t border-slate-100" />
+                      <button
+                        type="button"
+                        onClick={handlePatientLogout}
+                        disabled={authLoading}
+                        className="flex w-full items-center gap-3 rounded-2xl px-3 py-3 text-left text-xs font-bold text-rose-600 transition-colors hover:bg-rose-50 disabled:opacity-50 cursor-pointer"
+                      >
+                        <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-rose-50 text-rose-600">
+                          <LogOut className="h-4 w-4" />
+                        </span>
+                        <span>{authLoading ? 'Signing out...' : 'Log Out'}</span>
+                      </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {!currentUser && authReady && (
                 <button
                   type="button"
-                  onClick={handlePatientLogout}
-                  disabled={authLoading}
-                  className="flex items-center gap-1.5 bg-slate-900 hover:bg-rose-950/50 text-slate-300 hover:text-rose-400 border border-slate-800 hover:border-rose-900/50 px-3.5 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer disabled:opacity-50"
-                  title="Log out of patient session"
+                  onClick={() => {
+                    setAuthTab('login');
+                    setShowAuthModal(true);
+                  }}
+                  className="flex items-center gap-1.5 rounded-xl border border-blue-500/40 bg-blue-600 px-3.5 py-2.5 text-xs font-bold text-white transition-colors hover:bg-blue-700 cursor-pointer"
                 >
-                  <LogOut className="h-3.5 w-3.5" />
-                  <span>{authLoading ? 'Signing out...' : 'Log Out'}</span>
+                  <UserRound className="h-3.5 w-3.5" />
+                  Sign In
                 </button>
               )}
             </div>
           </div>
+          </div>
 
           {/* Search Box */}
           {activeTab === 'DIRECTORY' && (
-            <div className="mt-6 relative max-w-2xl">
+          <div className="relative w-full max-w-2xl">
               <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-slate-400">
                 <Search className="w-5 h-5" />
               </div>
@@ -1319,7 +1443,7 @@ function DoctorBookingDirectoryContent() {
         )}
 
         {/* VIEW 2: TRACK MY TOKEN TAB */}
-        {activeTab === 'TRACKER' && !confirmedTicket && (
+        {activeTab === 'TRACKER' && currentUser && !confirmedTicket && (
           <div className="max-w-md mx-auto bg-white rounded-3xl p-6 sm:p-8 shadow-xl border border-slate-200">
             <div className="text-center mb-6">
               <div className="w-12 h-12 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center mx-auto mb-3">
@@ -1547,6 +1671,76 @@ function DoctorBookingDirectoryContent() {
           </div>
         )}
       </main>
+
+      {showHistory && currentUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-xs">
+          <div className="max-h-[min(42rem,90vh)] w-full max-w-2xl overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl">
+            <div className="flex items-start justify-between border-b border-slate-100 bg-slate-50/80 px-5 py-4 sm:px-6">
+              <div>
+                <span className="text-[10px] font-extrabold uppercase tracking-[0.18em] text-blue-600">Patient profile</span>
+                <h2 className="mt-1 text-lg font-black text-slate-900">Booking History</h2>
+                <p className="mt-0.5 text-xs text-slate-500">Your recent queue tokens and consultation status.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowHistory(false)}
+                className="flex h-8 w-8 items-center justify-center rounded-xl text-lg font-bold text-slate-400 transition-colors hover:bg-white hover:text-slate-700 cursor-pointer"
+                aria-label="Close booking history"
+              >
+                &times;
+              </button>
+            </div>
+
+            <div className="max-h-[calc(90vh-7.5rem)] overflow-y-auto p-5 sm:p-6">
+              {historyLoading ? (
+                <div className="py-12 text-center">
+                  <div className="mx-auto mb-3 h-8 w-8 animate-spin rounded-full border-4 border-blue-600 border-t-transparent" />
+                  <p className="text-xs font-bold text-slate-400">Loading your history...</p>
+                </div>
+              ) : historyError ? (
+                <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-xs font-semibold text-rose-700">
+                  {historyError}
+                </div>
+              ) : historyTickets.length === 0 ? (
+                <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-5 py-12 text-center">
+                  <HistoryIcon className="mx-auto mb-3 h-9 w-9 text-slate-300" />
+                  <h3 className="text-sm font-black text-slate-700">No bookings yet</h3>
+                  <p className="mt-1 text-xs text-slate-400">Your completed and active tokens will appear here.</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {historyTickets.map((ticket) => {
+                    const doctor = doctors.find((item) => item.id === ticket.doctor_id);
+                    const statusLabel = ticket.status.replaceAll('-', ' ');
+                    const statusClass = ticket.status === 'completed'
+                      ? 'bg-emerald-50 text-emerald-700'
+                      : ticket.status === 'cancelled' || ticket.status === 'skipped'
+                        ? 'bg-rose-50 text-rose-700'
+                        : 'bg-blue-50 text-blue-700';
+
+                    return (
+                      <div key={ticket.id} className="flex items-center justify-between gap-4 rounded-2xl border border-slate-200 bg-white p-3.5 shadow-sm">
+                        <div className="flex min-w-0 items-center gap-3">
+                          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-50 text-sm font-black text-blue-700">
+                            {ticket.token_number}
+                          </div>
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-black text-slate-800">{doctor?.name || 'Doctor consultation'}</p>
+                            <p className="truncate text-[11px] text-slate-500">{doctor?.clinic_name || 'Clinic'} · {new Date(ticket.created_at).toLocaleDateString()}</p>
+                          </div>
+                        </div>
+                        <span className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-extrabold capitalize ${statusClass}`}>
+                          {statusLabel}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* QUICK BOOKING MODAL */}
       {selectedDoctor && currentUser && (
