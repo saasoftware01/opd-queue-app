@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useMemo, useCallback, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import type { User as SupabaseUser } from '@supabase/supabase-js';
-import { supabase } from '@/lib/supabase/client';
+import { patientSupabase } from '@/lib/supabase/patient-client';
 import { formatOpdSessions, getOpdSessions, OpdSession } from '@/lib/opd-schedule';
 import { 
   Search, 
@@ -125,6 +125,8 @@ function getErrorMessage(error: unknown, fallback: string): string {
 }
 
 const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const PATIENT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+const PATIENT_ACTIVITY_STORAGE_KEY = 'opd-queue-patient-last-activity';
 
 function getLocalDateString(date = new Date()): string {
   const year = date.getFullYear();
@@ -195,14 +197,21 @@ function DoctorBookingDirectoryContent() {
     let isMounted = true;
     let receivedAuthEvent = false;
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = patientSupabase.auth.onAuthStateChange((event, session) => {
       receivedAuthEvent = true;
       if (!isMounted) return;
+      if (event === 'SIGNED_IN') {
+        try {
+          window.localStorage.setItem(PATIENT_ACTIVITY_STORAGE_KEY, String(Date.now()));
+        } catch (error) {
+          console.error('Failed to persist patient session activity:', error);
+        }
+      }
       applyAuthenticatedUser(session?.user ?? null);
       setAuthReady(true);
     });
 
-    supabase.auth.getSession().then(({ data: { session }, error }) => {
+    patientSupabase.auth.getSession().then(({ data: { session }, error }) => {
       if (error) throw error;
       if (!isMounted) return;
       if (!receivedAuthEvent) applyAuthenticatedUser(session?.user ?? null);
@@ -220,6 +229,115 @@ function DoctorBookingDirectoryContent() {
     };
   }, [applyAuthenticatedUser]);
 
+  useEffect(() => {
+    if (!currentUser) return;
+
+    let timeoutId: number | undefined;
+    let isSigningOut = false;
+    let lastActivityAt = Date.now();
+
+    const readLastActivity = () => {
+      try {
+        const storedTimestamp = window.localStorage.getItem(PATIENT_ACTIVITY_STORAGE_KEY);
+        if (storedTimestamp) {
+          const timestamp = Number(storedTimestamp);
+          if (Number.isFinite(timestamp) && timestamp > 0) return timestamp;
+        }
+      } catch (error) {
+        console.error('Failed to read patient session activity:', error);
+      }
+      return lastActivityAt;
+    };
+
+    const recordActivity = (timestamp: number) => {
+      lastActivityAt = timestamp;
+      try {
+        window.localStorage.setItem(PATIENT_ACTIVITY_STORAGE_KEY, String(timestamp));
+      } catch (error) {
+        console.error('Failed to persist patient session activity:', error);
+      }
+    };
+
+    const expireIfIdle = async () => {
+      const remainingTime = PATIENT_IDLE_TIMEOUT_MS - (Date.now() - readLastActivity());
+      if (remainingTime > 0) {
+        scheduleExpiry();
+        return;
+      }
+      if (isSigningOut) return;
+
+      isSigningOut = true;
+      try {
+        const { error } = await patientSupabase.auth.signOut({ scope: 'local' });
+        if (error) throw error;
+        setAuthNotice('You were signed out after 30 minutes of inactivity. Sign in again to continue.');
+        setShowAuthModal(true);
+      } catch (error: unknown) {
+        console.error('Patient session timeout sign-out failed:', error);
+        setAuthError(getErrorMessage(error, 'Could not end the inactive patient session.'));
+        isSigningOut = false;
+      }
+    };
+
+    const scheduleExpiry = () => {
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+      const remainingTime = PATIENT_IDLE_TIMEOUT_MS - (Date.now() - readLastActivity());
+      if (remainingTime <= 0) {
+        void expireIfIdle();
+        return;
+      }
+      timeoutId = window.setTimeout(() => {
+        void expireIfIdle();
+      }, remainingTime);
+    };
+
+    const handleActivity = () => {
+      const now = Date.now();
+      if (now - readLastActivity() >= PATIENT_IDLE_TIMEOUT_MS) {
+        void expireIfIdle();
+        return;
+      }
+      recordActivity(now);
+      scheduleExpiry();
+    };
+
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key === PATIENT_ACTIVITY_STORAGE_KEY) scheduleExpiry();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') handleActivity();
+    };
+
+    try {
+      const storedActivity = window.localStorage.getItem(PATIENT_ACTIVITY_STORAGE_KEY);
+      const storedTimestamp = Number(storedActivity);
+      if (!storedActivity || !Number.isFinite(storedTimestamp) || storedTimestamp <= 0) {
+        recordActivity(lastActivityAt);
+      } else {
+        lastActivityAt = storedTimestamp;
+      }
+    } catch (error) {
+      console.error('Failed to initialize patient session activity:', error);
+    }
+    scheduleExpiry();
+    document.addEventListener('pointerdown', handleActivity, { passive: true });
+    document.addEventListener('keydown', handleActivity);
+    document.addEventListener('touchstart', handleActivity, { passive: true });
+    document.addEventListener('scroll', handleActivity, { passive: true });
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('storage', handleStorage);
+
+    return () => {
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+      document.removeEventListener('pointerdown', handleActivity);
+      document.removeEventListener('keydown', handleActivity);
+      document.removeEventListener('touchstart', handleActivity);
+      document.removeEventListener('scroll', handleActivity);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('storage', handleStorage);
+    };
+  }, [currentUser]);
+
   const handlePatientAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthLoading(true);
@@ -228,7 +346,7 @@ function DoctorBookingDirectoryContent() {
 
     try {
       if (authTab === 'login') {
-        const { data, error } = await supabase.auth.signInWithPassword({
+        const { data, error } = await patientSupabase.auth.signInWithPassword({
           email: authEmail.trim(),
           password: authPassword,
         });
@@ -240,7 +358,7 @@ function DoctorBookingDirectoryContent() {
         if (!patientName.trim()) throw new Error('Please enter your full name.');
         if (cleanPhone.length !== 10) throw new Error('Please enter a valid 10-digit mobile number.');
 
-        const { data, error } = await supabase.auth.signUp({
+        const { data, error } = await patientSupabase.auth.signUp({
           email: authEmail.trim(),
           password: authPassword,
           options: {
@@ -278,7 +396,7 @@ function DoctorBookingDirectoryContent() {
     setAuthLoading(true);
     setAuthError('');
     try {
-      const { error } = await supabase.auth.signOut();
+      const { error } = await patientSupabase.auth.signOut({ scope: 'local' });
       if (error) throw error;
       applyAuthenticatedUser(null);
     } catch (err: unknown) {
@@ -317,15 +435,15 @@ function DoctorBookingDirectoryContent() {
 
         // Safe parallel queries using allSettled so one table never breaks the others
         const [docRes, clinicsRes, deptsRes, ticketsRes, ratingsRes] = await Promise.allSettled([
-          supabase.from('doctors').select('*').order('created_at', { ascending: false }),
-          supabase.from('clinics').select('id, name, booking_fee'),
-          supabase.from('departments').select('id, name'),
-          supabase
+          patientSupabase.from('doctors').select('*').order('created_at', { ascending: false }),
+          patientSupabase.from('clinics').select('id, name, booking_fee'),
+          patientSupabase.from('departments').select('id, name'),
+          patientSupabase
             .from('tickets')
             .select('id, doctor_id, status, token_number, patient_name')
             .gte('created_at', `${today}T00:00:00.000Z`)
           ,
-          supabase
+          patientSupabase
             .from('tickets')
             .select('doctor_id, rating')
             .eq('status', 'completed')
@@ -422,7 +540,7 @@ function DoctorBookingDirectoryContent() {
 
       try {
         const today = new Date().toISOString().split('T')[0];
-        const { data, error } = await supabase
+        const { data, error } = await patientSupabase
           .from('tickets')
           .select('doctor_id, status, token_number, patient_name')
           .gte('created_at', `${today}T00:00:00.000Z`);
@@ -478,7 +596,7 @@ function DoctorBookingDirectoryContent() {
       }, 150);
     };
 
-    const channel = supabase
+    const channel = patientSupabase
       .channel('booking-directory-live-updates')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'doctors' }, () => {
         if (refreshTimeout) clearTimeout(refreshTimeout);
@@ -520,7 +638,7 @@ function DoctorBookingDirectoryContent() {
       window.clearInterval(metricsPoll);
       if (refreshTimeout) clearTimeout(refreshTimeout);
       if (metricRefreshTimeout) clearTimeout(metricRefreshTimeout);
-      void supabase.removeChannel(channel);
+      void patientSupabase.removeChannel(channel);
     };
   }, []);
 
@@ -534,7 +652,7 @@ function DoctorBookingDirectoryContent() {
     let isActive = true;
 
     async function loadTrackedDoctor() {
-      const { data, error } = await supabase
+      const { data, error } = await patientSupabase
         .from('doctors')
         .select('id, opd_status, broadcast_message')
         .eq('id', trackedDoctorId)
@@ -548,7 +666,7 @@ function DoctorBookingDirectoryContent() {
       if (isActive && data) setTrackedDoctor(data);
     }
 
-    const channel = supabase
+    const channel = patientSupabase
       .channel(`tracked-doctor-${trackedDoctorId}`)
       .on(
         'postgres_changes',
@@ -563,7 +681,7 @@ function DoctorBookingDirectoryContent() {
 
     return () => {
       isActive = false;
-      supabase.removeChannel(channel);
+      patientSupabase.removeChannel(channel);
     };
   }, [trackedDoctorId]);
 
@@ -576,7 +694,7 @@ function DoctorBookingDirectoryContent() {
       try {
         const today = new Date().toISOString().split('T')[0];
 
-        const { data: currentT } = await supabase
+        const { data: currentT } = await patientSupabase
           .from('tickets')
         .select('status, token_number, created_at, doctor_id, rating')
           .eq('id', activeTicketId)
@@ -585,7 +703,7 @@ function DoctorBookingDirectoryContent() {
         if (currentT) {
           setConfirmedTicket(prev => prev ? { ...prev, status: currentT.status, rating: currentT.rating } : null);
 
-          const { data: inCabin } = await supabase
+          const { data: inCabin } = await patientSupabase
             .from('tickets')
             .select('token_number')
             .eq('doctor_id', currentT.doctor_id)
@@ -595,7 +713,7 @@ function DoctorBookingDirectoryContent() {
 
           setNowServingToken(inCabin?.token_number || 'None');
 
-          const { count } = await supabase
+          const { count } = await patientSupabase
             .from('tickets')
             .select('*', { count: 'exact', head: true })
             .eq('doctor_id', currentT.doctor_id)
@@ -612,7 +730,7 @@ function DoctorBookingDirectoryContent() {
 
     syncLiveQueuePosition();
 
-    const channel = supabase
+    const channel = patientSupabase
       .channel(`live-ticket-${activeTicketId}`)
       .on(
         'postgres_changes',
@@ -624,7 +742,7 @@ function DoctorBookingDirectoryContent() {
       .subscribe();
 
     return () => {
-      supabase.removeChannel(channel);
+      patientSupabase.removeChannel(channel);
     };
   }, [confirmedTicketId]);
 
@@ -670,7 +788,7 @@ function DoctorBookingDirectoryContent() {
         throw new Error('Please select the patient gender.');
       }
 
-      const { data: currentSchedule, error: scheduleError } = await supabase
+      const { data: currentSchedule, error: scheduleError } = await patientSupabase
         .from('doctors')
         .select('weekly_off_days, opd_holiday_dates')
         .eq('id', selectedDoctor.id)
@@ -688,7 +806,7 @@ function DoctorBookingDirectoryContent() {
 
       const today = new Date().toISOString().split('T')[0];
 
-      const { data: existingTicket } = await supabase
+      const { data: existingTicket } = await patientSupabase
         .from('tickets')
         .select('id, token_number, status')
         .eq('doctor_id', selectedDoctor.id)
@@ -701,7 +819,7 @@ function DoctorBookingDirectoryContent() {
         throw new Error(`You already have an active Token (#${existingTicket.token_number}) in queue today.`);
       }
 
-      const { data: ticketData, error: ticketError } = await supabase
+      const { data: ticketData, error: ticketError } = await patientSupabase
         .from('tickets')
         .insert([
           {
@@ -759,7 +877,7 @@ function DoctorBookingDirectoryContent() {
 
       const today = new Date().toISOString().split('T')[0];
 
-      const { data: ticket, error: ticketErr } = await supabase
+      const { data: ticket, error: ticketErr } = await patientSupabase
         .from('tickets')
         .select(`
           id,
@@ -818,7 +936,7 @@ function DoctorBookingDirectoryContent() {
     setRatingSaving(true);
     setRatingMessage('');
     try {
-      const { error } = await supabase
+      const { error } = await patientSupabase
         .from('tickets')
         .update({ rating })
         .eq('id', confirmedTicket.id)
@@ -844,7 +962,7 @@ function DoctorBookingDirectoryContent() {
     setCancelLoading(true);
 
     try {
-      const { error } = await supabase
+      const { error } = await patientSupabase
         .from('tickets')
         .update({ 
           status: 'skipped', 
@@ -1367,15 +1485,22 @@ function DoctorBookingDirectoryContent() {
                           </div>
                         </div>
                       ) : null}
-                      <div className="mt-2 flex items-center justify-between rounded-xl border border-slate-100 bg-slate-50 px-3 py-2 text-xs">
-                        <span className="flex items-center gap-1.5 font-medium text-slate-500">
-                          <Users className="h-3.5 w-3.5 text-blue-600" />
-                          <span>Waiting in line</span>
-                        </span>
-                        <span className="font-bold text-slate-900">
-                          {doc.waiting_count || 0} {(doc.waiting_count || 0) === 1 ? 'patient' : 'patients'}
-                        </span>
-                      </div>
+                      {(doc.waiting_count ?? 0) > 0 ? (
+                        <div className="mt-2 flex items-center justify-between rounded-xl border border-slate-100 bg-slate-50 px-3 py-2 text-xs">
+                          <span className="flex items-center gap-1.5 font-medium text-slate-500">
+                            <Users className="h-3.5 w-3.5 text-blue-600" />
+                            <span>Waiting in line</span>
+                          </span>
+                          <span className="font-bold text-slate-900">
+                            {doc.waiting_count} {doc.waiting_count === 1 ? 'patient' : 'patients'}
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="mt-2 flex items-center gap-1.5 rounded-xl border border-slate-100 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-500">
+                          <Users className="h-3.5 w-3.5 text-slate-400" />
+                          <span>No patients waiting yet</span>
+                        </div>
+                      )}
                     </div>
 
                     {/* Action Button */}
