@@ -1,7 +1,6 @@
 'use client';
 
 import React, { useState, useEffect, useMemo } from 'react';
-import Link from 'next/link';
 import { useSearchParams, useRouter, usePathname } from 'next/navigation';
 import { supabase } from '@/lib/supabase/client';
 
@@ -9,12 +8,10 @@ import {
   Users, 
   UserPlus, 
   Printer, 
-  ArrowLeft, 
   AlertCircle, 
   CheckCircle2, 
   X,
   Clock,
-  ShieldAlert,
   UserCheck,
   SkipForward,
   PauseCircle,
@@ -44,6 +41,7 @@ import {
   OPD_SHIFTS,
   OpdSession,
 } from '@/lib/opd-schedule';
+import { getErrorMessage } from '@/lib/error-message';
 
 interface ExtendedDoctor extends Doctor {
   clinic_name?: string;
@@ -115,7 +113,10 @@ export default function ReceptionDeskPage() {
   const [departments, setDepartments] = useState<Department[]>([]);
   const [doctors, setDoctors] = useState<ExtendedDoctor[]>([]);
   const [selectedDoctorId, setSelectedDoctorId] = useState<string>('');
-  const [currentDoctor, setCurrentDoctor] = useState<ExtendedDoctor | null>(null);
+  const currentDoctor = useMemo(
+    () => doctors.find((doctor) => doctor.id === selectedDoctorId) || null,
+    [doctors, selectedDoctorId]
+  );
 
   const [queueTickets, setQueueTickets] = useState<QueueTicket[]>([]);
   const [skippedTickets, setSkippedTickets] = useState<QueueTicket[]>([]);
@@ -195,12 +196,10 @@ export default function ReceptionDeskPage() {
             : docs[0].id;
           
           setSelectedDoctorId(targetDocId);
-          const initialDoc = docs.find(d => d.id === targetDocId) || docs[0];
-          setCurrentDoctor(initialDoc);
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
         console.error('Initialization error:', err);
-        setErrorMsg(err.message || 'Failed to load doctors and departments');
+        setErrorMsg(getErrorMessage(err, 'Failed to load doctors and departments'));
       } finally {
         setLoading(false);
       }
@@ -213,9 +212,8 @@ export default function ReceptionDeskPage() {
   useEffect(() => {
     if (!selectedDoctorId || doctors.length === 0) return;
     const doc = doctors.find((d) => d.id === selectedDoctorId) || null;
-    setCurrentDoctor(doc);
     if (doc) {
-      fetchDoctorQueue(doc.department_id, doc.id);
+      void fetchDoctorQueue(doc.department_id, doc.id);
     }
   }, [selectedDoctorId, doctors]);
 
@@ -255,7 +253,7 @@ export default function ReceptionDeskPage() {
   }, [currentDoctor]);
 
   // Fetch queue items matching the active department/doctor
-  const fetchDoctorQueue = async (deptId: string, docId: string) => {
+  async function fetchDoctorQueue(deptId: string, docId: string) {
     try {
       const today = new Date().toISOString().split('T')[0];
 
@@ -292,10 +290,10 @@ export default function ReceptionDeskPage() {
 
       setQueueTickets(waiting);
       setSkippedTickets(skipped);
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Queue load error:', err);
     }
-  };
+  }
 
   const historyDoctorId = currentDoctor?.id;
   const historyDepartmentId = currentDoctor?.department_id;
@@ -425,8 +423,8 @@ export default function ReceptionDeskPage() {
 
       setSuccessMsg(`Called Token ${nextTicket.token_number} (${nextTicket.patient_name})`);
       fetchDoctorQueue(currentDoctor.department_id, currentDoctor.id);
-    } catch (err: any) {
-      setErrorMsg(err.message || 'Failed to call next patient');
+    } catch (err: unknown) {
+      setErrorMsg(getErrorMessage(err, 'Failed to call next patient'));
     } finally {
       setActionLoading(false);
     }
@@ -481,8 +479,8 @@ export default function ReceptionDeskPage() {
       setShowCompleteModal(false);
       setCurrentPatient(null);
       fetchDoctorQueue(currentDoctor.department_id, currentDoctor.id);
-    } catch (err: any) {
-      setCompletionError(err.message || 'Failed to complete consultation');
+    } catch (err: unknown) {
+      setCompletionError(getErrorMessage(err, 'Failed to complete consultation'));
     } finally {
       setActionLoading(false);
     }
@@ -509,8 +507,8 @@ export default function ReceptionDeskPage() {
       setSuccessMsg(`Put Token ${currentPatient.token_number} on hold / skipped`);
       setCurrentPatient(null);
       fetchDoctorQueue(currentDoctor.department_id, currentDoctor.id);
-    } catch (err: any) {
-      setErrorMsg(err.message || 'Failed to hold ticket');
+    } catch (err: unknown) {
+      setErrorMsg(getErrorMessage(err, 'Failed to hold ticket'));
     } finally {
       setActionLoading(false);
     }
@@ -545,8 +543,8 @@ export default function ReceptionDeskPage() {
 
       setSuccessMsg(`Token ${ticket.token_number} has been reactivated and added to the waiting queue.`);
       await fetchDoctorQueue(currentDoctor.department_id, currentDoctor.id);
-    } catch (err: any) {
-      setErrorMsg(err.message || 'Failed to reactivate patient');
+    } catch (err: unknown) {
+      setErrorMsg(getErrorMessage(err, 'Failed to reactivate patient'));
     } finally {
       setActionLoading(false);
     }
@@ -613,8 +611,8 @@ export default function ReceptionDeskPage() {
       setPaymentMode('CASH');
 
       fetchDoctorQueue(currentDoctor.department_id, currentDoctor.id);
-    } catch (err: any) {
-      setErrorMsg(err.message || 'Failed to create walk-in token');
+    } catch (err: unknown) {
+      setErrorMsg(getErrorMessage(err, 'Failed to create walk-in token'));
     } finally {
       setActionLoading(false);
     }
@@ -648,7 +646,6 @@ export default function ReceptionDeskPage() {
 
       if (error) throw error;
 
-      setCurrentDoctor(prev => prev ? { ...prev, opd_status: status, broadcast_message: message } : null);
       setDoctors(prev => prev.map(doctor =>
         doctor.id === currentDoctor.id
           ? { ...doctor, opd_status: status, broadcast_message: message }
@@ -661,8 +658,8 @@ export default function ReceptionDeskPage() {
       } else {
         setSuccessMsg('OPD resumed. Queue operations active.');
       }
-    } catch (err: any) {
-      setErrorMsg(err.message || 'Failed to update OPD status');
+    } catch (err: unknown) {
+      setErrorMsg(getErrorMessage(err, 'Failed to update OPD status'));
     } finally {
       setActionLoading(false);
     }
@@ -706,14 +703,6 @@ export default function ReceptionDeskPage() {
 
       if (error) throw error;
 
-      setCurrentDoctor({
-        ...currentDoctor,
-        opd_timing: legacyTiming,
-        opd_shift: firstSession.shift,
-        opd_sessions: newOpdSessions,
-        weekly_off_days: newWeeklyOffDays,
-        opd_holiday_dates: newHolidayDates,
-      });
       setDoctors((previousDoctors) => previousDoctors.map((doctor) =>
         doctor.id === currentDoctor.id
           ? {
@@ -728,8 +717,8 @@ export default function ReceptionDeskPage() {
       ));
       setShowTimingModal(false);
       setSuccessMsg(`Updated OPD schedule for ${currentDoctor.name}.`);
-    } catch (err: any) {
-      setTimingError(err.message || 'Failed to update the OPD schedule.');
+    } catch (err: unknown) {
+      setTimingError(getErrorMessage(err, 'Failed to update the OPD schedule.'));
     } finally {
       setActionLoading(false);
     }
@@ -829,7 +818,7 @@ export default function ReceptionDeskPage() {
     <div className="min-h-screen bg-slate-100 flex flex-col justify-between">
       {/* Top Header */}
       <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-xs">
-        <div className="max-w-7xl mx-auto px-4 py-3 sm:px-6 lg:px-8 sm:h-20 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="max-w-7xl mx-auto px-4 py-3 sm:px-6 lg:px-8 min-h-20 flex flex-col gap-3 lg:h-20 lg:flex-row lg:items-center lg:justify-between lg:py-0">
           <div className="flex min-w-0 items-center space-x-3">
             
             <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center text-white shadow-md">
@@ -849,10 +838,10 @@ export default function ReceptionDeskPage() {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 items-stretch gap-2 sm:flex sm:flex-wrap sm:items-center sm:gap-3">
+          <div className="grid grid-cols-3 items-stretch gap-1.5 sm:gap-2 lg:flex lg:flex-wrap lg:items-center lg:gap-3">
             {/* Show Dropdown only if in Multi-Doctor Hospital mode */}
             {!isSoloClinicMode && (
-              <div className="col-span-2 flex min-w-0 items-center space-x-2 rounded-xl border border-slate-300 bg-slate-50 p-1.5 sm:col-span-1">
+              <div className="col-span-3 flex min-w-0 items-center space-x-2 rounded-xl border border-slate-300 bg-slate-50 p-1.5 lg:col-span-1">
                 <Stethoscope className="w-4 h-4 text-slate-500 ml-1.5" />
                 <select
                   value={selectedDoctorId}
@@ -884,7 +873,7 @@ export default function ReceptionDeskPage() {
                 setNewHolidayDate('');
                 setShowTimingModal(true);
               }}
-              className="col-span-2 flex min-w-0 items-center justify-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-bold text-blue-700 transition-colors hover:bg-blue-100 cursor-pointer sm:col-span-1"
+              className="col-span-3 flex min-w-0 items-center justify-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-bold text-blue-700 transition-colors hover:bg-blue-100 cursor-pointer lg:col-span-1"
               title="Click to edit doctor OPD schedule"
             >
               <Clock className="h-3.5 w-3.5 shrink-0 text-blue-600" />
@@ -900,35 +889,35 @@ export default function ReceptionDeskPage() {
               <span className="shrink-0 text-[10px] text-blue-500 underline">Edit</span>
             </button>
 
-                        {/* Emergency Broadcast / Pause OPD Button */}
+            {/* Emergency Broadcast / Pause OPD Button */}
             <button
               onClick={handleTogglePauseClick}
-              className={`flex min-w-0 items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-xs font-bold transition-all shadow-xs cursor-pointer sm:px-4 ${
+              className={`flex min-w-0 items-center justify-center gap-1 rounded-xl px-1.5 py-2 text-[10px] font-bold transition-all shadow-xs cursor-pointer sm:gap-1.5 sm:px-2.5 sm:py-2.5 sm:text-xs lg:gap-2 lg:px-4 ${
                 isOpdPaused
                   ? 'bg-amber-600 hover:bg-amber-700 text-white animate-pulse'
                   : 'bg-slate-200 hover:bg-slate-300 text-slate-700'
               }`}
             >
-              {isOpdPaused ? <PlayCircle className="w-4 h-4" /> : <PauseCircle className="w-4 h-4" />}
+              {isOpdPaused ? <PlayCircle className="h-3.5 w-3.5 shrink-0 sm:h-4 sm:w-4" /> : <PauseCircle className="h-3.5 w-3.5 shrink-0 sm:h-4 sm:w-4" />}
               <span className="truncate">{isOpdPaused ? 'Resume OPD' : 'Pause OPD'}</span>
             </button>
 
             {/* Quick Add Walk-in Button */}
             <button
               onClick={() => setShowWalkinModal(true)}
-              className="flex min-w-0 items-center justify-center gap-2 rounded-xl bg-blue-600 px-3 py-2.5 text-xs font-bold text-white shadow-md transition-colors hover:bg-blue-700 cursor-pointer sm:px-4"
+              className="flex min-w-0 items-center justify-center gap-1 rounded-xl bg-blue-600 px-1.5 py-2 text-[10px] font-bold text-white shadow-md transition-colors hover:bg-blue-700 cursor-pointer sm:gap-1.5 sm:px-2.5 sm:py-2.5 sm:text-xs lg:gap-2 lg:px-4"
             >
-              <UserPlus className="w-4 h-4" />
+              <UserPlus className="h-3.5 w-3.5 shrink-0 sm:h-4 sm:w-4" />
               <span className="truncate">+ Add Walk-In</span>
             </button>
 
             {/* Log Out Button */}
             <button
               onClick={handleLogout}
-              className="flex min-w-0 items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-slate-100 px-3 py-2.5 text-xs font-bold text-slate-600 transition-all hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600 cursor-pointer"
+              className="flex min-w-0 items-center justify-center gap-1 rounded-xl border border-slate-200 bg-slate-100 px-1.5 py-2 text-[10px] font-bold text-slate-600 transition-all hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600 cursor-pointer sm:gap-1.5 sm:px-2.5 sm:py-2.5 sm:text-xs lg:px-3"
               title="Log Out of Clinic Session"
             >
-              <LogOut className="w-4 h-4" />
+              <LogOut className="h-3.5 w-3.5 shrink-0 sm:h-4 sm:w-4" />
               <span className="truncate">Log Out</span>
             </button>
           </div>
@@ -1262,7 +1251,7 @@ export default function ReceptionDeskPage() {
                 ) : queueTickets.length === 0 && skippedTickets.length === 0 ? (
                   <tr>
                     <td colSpan={10} className="py-12 text-center text-slate-400 text-sm">
-                      No patients waiting in queue. Click <span className="font-bold text-blue-600">"+ Add Walk-In"</span> to register an offline patient.
+                      No patients waiting in queue. Click <span className="font-bold text-blue-600">&quot;+ Add Walk-In&quot;</span> to register an offline patient.
                     </td>
                   </tr>
                 ) : (
@@ -1790,7 +1779,12 @@ export default function ReceptionDeskPage() {
                   </label>
                   <select
                     value={priority}
-                    onChange={(e) => setPriority(e.target.value as any)}
+                    onChange={(e) => {
+                      const selectedPriority = e.target.value;
+                      if (selectedPriority === 'normal' || selectedPriority === 'senior' || selectedPriority === 'emergency') {
+                        setPriority(selectedPriority);
+                      }
+                    }}
                     className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-xs font-bold text-slate-800 focus:ring-2 focus:ring-blue-500"
                   >
                     <option value="normal">Normal</option>
@@ -1805,7 +1799,11 @@ export default function ReceptionDeskPage() {
                   </label>
                   <select
                     value={paymentMode}
-                    onChange={(e) => setPaymentMode(e.target.value as any)}
+                    onChange={(e) => {
+                      if (e.target.value === 'CASH' || e.target.value === 'UPI') {
+                        setPaymentMode(e.target.value);
+                      }
+                    }}
                     className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-xs font-bold text-slate-800 focus:ring-2 focus:ring-blue-500"
                   >
                     <option value="CASH">Cash (₹{consultationFee})</option>
@@ -2264,7 +2262,6 @@ export default function ReceptionDeskPage() {
           </div>
         </div>
       )}
-
       {showLogoutModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-xs">
           <div
