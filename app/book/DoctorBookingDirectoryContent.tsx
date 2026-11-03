@@ -1024,16 +1024,17 @@ function DoctorBookingDirectoryContent() {
                 {filteredDoctors.map((doc) => (
                   <div
                     key={doc.id}
-                    className="h-full bg-white rounded-3xl p-5 border border-slate-200/90 shadow-xs hover:shadow-md transition-all flex flex-col justify-between"
+                    className="group relative h-full overflow-hidden rounded-3xl border border-slate-200/90 bg-white shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-blue-200 hover:shadow-lg"
                   >
+                    <div className="flex h-full flex-col justify-between p-5">
                     <div>
                       {/* Top badges */}
                       <div className="flex min-h-8 items-start justify-between gap-2 mb-3">
-                        <span className="flex min-h-7 max-w-[55%] items-center rounded-lg bg-blue-50 px-2.5 py-1 text-[11px] font-bold leading-4 text-blue-700">
+                        <span className="flex min-h-7 max-w-[55%] items-center rounded-full border border-blue-100 bg-blue-50 px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-wide leading-4 text-blue-700">
                           {doc.department_name}
                         </span>
                         
-                        <span className="flex min-h-7 max-w-[45%] items-center gap-1 rounded-lg bg-emerald-50 px-2.5 py-1 text-[11px] font-bold leading-4 text-emerald-700">
+                        <span className="flex min-h-7 max-w-[45%] items-center gap-1 rounded-full border border-emerald-100 bg-emerald-50 px-2.5 py-1 text-[10px] font-extrabold leading-4 text-emerald-700">
                           <IndianRupee className="w-3 h-3" />
                           <span className="truncate">{doc.booking_fee === 0 ? 'Free Booking' : `₹${doc.booking_fee} Booking`}</span>
                         </span>
@@ -1041,20 +1042,25 @@ function DoctorBookingDirectoryContent() {
 
                       {/* Doctor & Clinic */}
                       <div className="grid min-h-12 grid-cols-[minmax(0,1fr)_minmax(7rem,42%)] items-center gap-3">
-                        <h3
-                          className="min-w-0 text-base font-black leading-5 tracking-tight text-slate-900"
-                          title={doc.name}
-                        >
-                          <span className="line-clamp-2">{doc.name}</span>
-                        </h3>
+                        <div className="flex min-w-0 items-center gap-2.5">
+                          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-600 to-indigo-600 text-white shadow-sm">
+                            <Stethoscope className="h-5 w-5" />
+                          </div>
+                          <h3
+                            className="min-w-0 text-base font-black leading-5 tracking-tight text-slate-900"
+                            title={doc.name}
+                          >
+                            <span className="line-clamp-2">{doc.name}</span>
+                          </h3>
+                        </div>
                         <div className="flex min-w-0 items-center justify-end gap-1.5 text-right text-xs font-medium leading-4 text-slate-600">
                           <span className="min-w-0 truncate" title={`${doc.clinic_name} · ${doc.room_number}`}>
                             {doc.clinic_name} · {doc.room_number}
                           </span>
-                          <Building2 className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                          <Building2 className="h-3.5 w-3.5 shrink-0 text-blue-500" />
                         </div>
                       </div>
-                      <div className="mt-1 flex min-h-5 items-center gap-1.5" aria-label={`Doctor rating ${doc.rating.toFixed(1)} out of 5`}>
+                      <div className="mt-2 flex min-h-5 items-center gap-1.5 pl-[3.125rem]" aria-label={`Doctor rating ${doc.rating.toFixed(1)} out of 5`}>
                         <div className="flex items-center text-amber-400">
                           {[1, 2, 3, 4, 5].map((star) => (
                             <Star
@@ -1066,8 +1072,8 @@ function DoctorBookingDirectoryContent() {
                         <span className="text-[11px] font-bold text-slate-600">{doc.rating.toFixed(1)}/5</span>
                       </div>
 
-                      <div className="mt-2.5 flex min-h-16 items-start gap-2 rounded-xl border border-slate-100 bg-slate-50 p-2.5 text-[11px] font-semibold text-slate-400">
-                        <Clock className="mt-1 h-3.5 w-3.5 shrink-0 text-blue-500" />
+                      <div className="mt-3 flex min-h-16 items-start gap-2 rounded-2xl border border-blue-100 bg-gradient-to-br from-blue-50/80 to-slate-50 p-2.5 text-[11px] font-semibold text-slate-400">
+                        <Clock className="mt-1 h-3.5 w-3.5 shrink-0 text-blue-600" />
                         <div className="grid min-w-0 flex-1 gap-1.5">
                           {doc.opd_sessions.length > 0
                             ? doc.opd_sessions.map((session) => (
@@ -1097,7 +1103,7 @@ function DoctorBookingDirectoryContent() {
 
                       {/* Live Queue Broadcast */}
                       {doc.current_token ? (
-                        <div className="mt-3.5 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs">
+                        <div className="mt-3.5 rounded-2xl border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs">
                           <div className="flex items-center gap-1.5 font-bold text-blue-700">
                             <Users className="h-3.5 w-3.5" />
                             <span>Now consulting</span>
@@ -1112,7 +1118,7 @@ function DoctorBookingDirectoryContent() {
                           </div>
                         </div>
                       ) : doc.waiting_count ? (
-                        <div className="mt-3.5 flex items-center justify-between rounded-xl border border-slate-100 bg-slate-50 px-3 py-2 text-xs">
+                        <div className="mt-3.5 flex items-center justify-between rounded-2xl border border-slate-100 bg-slate-50 px-3 py-2 text-xs">
                           <span className="flex items-center gap-1.5 font-medium text-slate-500">
                             <Users className="h-3.5 w-3.5 text-blue-600" />
                             <span>Waiting in line</span>
@@ -1120,7 +1126,7 @@ function DoctorBookingDirectoryContent() {
                           <span className="font-bold text-slate-900">{doc.waiting_count} patients</span>
                         </div>
                       ) : (
-                        <div className="mt-3.5 flex items-center gap-1.5 rounded-xl border border-slate-100 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-500">
+                        <div className="mt-3.5 flex items-center gap-1.5 rounded-2xl border border-slate-100 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-500">
                           <Users className="h-3.5 w-3.5 text-slate-400" />
                           <span>No patients waiting yet</span>
                         </div>
@@ -1129,7 +1135,10 @@ function DoctorBookingDirectoryContent() {
 
                     {/* Action Button */}
                     <div className="mt-5 pt-4 border-t border-slate-100 flex items-center justify-between">
-                      <span className="text-[11px] text-slate-400 font-medium">Instant Token</span>
+                      <div>
+                        <span className="block text-[10px] font-extrabold uppercase tracking-wider text-slate-400">Quick booking</span>
+                        <span className="text-[11px] font-medium text-slate-500">Get your queue token</span>
+                      </div>
                       <button
                         type="button"
                         disabled={Boolean(getDoctorClosureReason(doc))}
@@ -1137,12 +1146,13 @@ function DoctorBookingDirectoryContent() {
                           setSelectedDoctor(doc);
                           setErrorMsg('');
                         }}
-                        className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 active:scale-95 text-white text-xs font-bold transition-all shadow-xs cursor-pointer flex items-center gap-1.5 disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-600 disabled:shadow-none"
+                        className="flex cursor-pointer items-center gap-1.5 rounded-xl bg-blue-600 px-4 py-2.5 text-xs font-bold text-white shadow-sm transition-all hover:bg-blue-700 hover:shadow-md active:scale-95 disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-600 disabled:shadow-none"
                       >
                         <span>{getDoctorClosureReason(doc) ? 'Closed Today' : 'Book Token'}</span>
                         {!getDoctorClosureReason(doc) && <ArrowRight className="w-3.5 h-3.5" />}
                       </button>
                     </div>
+                  </div>
                   </div>
                 ))}
               </div>
