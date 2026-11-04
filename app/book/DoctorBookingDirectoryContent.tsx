@@ -158,6 +158,26 @@ function getDoctorClosureReason(
   return doctor.weekly_off_days.includes(weekday) ? `${weekday} off` : null;
 }
 
+function isWithinOpdSession(session: OpdSession, date: Date): boolean {
+  const currentMinutes = date.getHours() * 60 + date.getMinutes();
+  const [startHour, startMinute] = session.start_time.split(':').map(Number);
+  const [endHour, endMinute] = session.end_time.split(':').map(Number);
+  const startMinutes = startHour * 60 + startMinute;
+  const endMinutes = endHour * 60 + endMinute;
+
+  if (session.shift === 'Night' && endMinutes < startMinutes) {
+    return currentMinutes >= startMinutes || currentMinutes < endMinutes;
+  }
+
+  return currentMinutes >= startMinutes && currentMinutes < endMinutes;
+}
+
+function isDoctorOpdActive(doctor: DoctorDirectoryItem, date: Date): boolean {
+  return !getDoctorClosureReason(doctor, date)
+    && doctor.opd_status !== 'PAUSED'
+    && doctor.opd_sessions.some((session) => isWithinOpdSession(session, date));
+}
+
 function DoctorBookingDirectoryContent() {
   const searchParams = useSearchParams();
   const urlClinicId = searchParams?.get('clinic_id') || null;
@@ -171,6 +191,7 @@ function DoctorBookingDirectoryContent() {
   const [directoryRefreshKey, setDirectoryRefreshKey] = useState(0);
   const [queueRefreshFailed, setQueueRefreshFailed] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [currentTime, setCurrentTime] = useState(() => new Date());
   
   // Selected doctor for booking modal
   const [selectedDoctor, setSelectedDoctor] = useState<DoctorDirectoryItem | null>(null);
@@ -476,6 +497,11 @@ function DoctorBookingDirectoryContent() {
   const [patientRating, setPatientRating] = useState(0);
   const [ratingSaving, setRatingSaving] = useState(false);
   const [ratingMessage, setRatingMessage] = useState('');
+
+  useEffect(() => {
+    const clock = window.setInterval(() => setCurrentTime(new Date()), 30_000);
+    return () => window.clearInterval(clock);
+  }, []);
 
   // 1. Fetch all doctors and their live queue metrics for today
   useEffect(() => {
@@ -1558,11 +1584,26 @@ function DoctorBookingDirectoryContent() {
                             <span className="line-clamp-2">{doc.name}</span>
                           </h3>
                         </div>
-                        <div className="flex min-w-0 items-center justify-end gap-1.5 text-right text-xs font-medium leading-4 text-slate-600">
-                          <span className="min-w-0 truncate" title={`${doc.clinic_name} · ${doc.room_number}`}>
-                            {doc.clinic_name} · {doc.room_number}
+                        <div className="flex min-w-0 flex-col items-end gap-1 text-right text-xs font-medium leading-4 text-slate-600">
+                          <div className="flex min-w-0 items-center justify-end gap-1.5">
+                            <span className="min-w-0 truncate" title={`${doc.clinic_name} · ${doc.room_number}`}>
+                              {doc.clinic_name} · {doc.room_number}
+                            </span>
+                            <Building2 className="h-3.5 w-3.5 shrink-0 text-blue-500" />
+                          </div>
+                          <span
+                            aria-label={isDoctorOpdActive(doc, currentTime) ? 'OPD Active' : 'OPD Idle'}
+                            className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-extrabold leading-4 ${
+                              isDoctorOpdActive(doc, currentTime)
+                                ? 'border-emerald-100 bg-emerald-50 text-emerald-600'
+                                : 'border-rose-100 bg-rose-50 text-rose-600'
+                            }`}
+                          >
+                            <span className={`h-1.5 w-1.5 rounded-full ${
+                              isDoctorOpdActive(doc, currentTime) ? 'bg-emerald-500' : 'bg-rose-400'
+                            }`} />
+                            {isDoctorOpdActive(doc, currentTime) ? 'Active' : 'Idle'}
                           </span>
-                          <Building2 className="h-3.5 w-3.5 shrink-0 text-blue-500" />
                         </div>
                       </div>
                       <div className="mt-2 flex min-h-5 items-center gap-1.5 pl-[3.125rem]" aria-label={`Doctor rating ${doc.rating.toFixed(1)} out of 5`}>
