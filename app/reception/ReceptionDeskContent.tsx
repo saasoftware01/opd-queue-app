@@ -144,6 +144,7 @@ export default function ReceptionDeskPage() {
   const [newHolidayDates, setNewHolidayDates] = useState<string[]>([]);
   const [newHolidayDate, setNewHolidayDate] = useState('');
   const [showLogoutModal, setShowLogoutModal] = useState<boolean>(false);
+  const [showQuickTokenModal, setShowQuickTokenModal] = useState<boolean>(false);
   const [ticketToReactivate, setTicketToReactivate] = useState<QueueTicket | null>(null);
 
   const [loading, setLoading] = useState<boolean>(true);
@@ -618,6 +619,45 @@ export default function ReceptionDeskPage() {
     }
   };
 
+  const handleQuickWalkin = async () => {
+    if (!currentDoctor || actionLoading) return;
+
+    setActionLoading(true);
+    setErrorMsg('');
+    setSuccessMsg('');
+
+    try {
+      const selectedDept = departments.find((d) => d.id === currentDoctor.department_id);
+      const prefix = isSoloClinicMode ? 'T' : (selectedDept?.code || 'OPD');
+      const { data: newTicket, error: insertError } = await supabase
+        .from('tickets')
+        .insert([{
+          token_number: prefix,
+          patient_name: 'Walk-in Patient',
+          phone_number: null,
+          patient_age: null,
+          patient_gender: null,
+          department_id: currentDoctor.department_id,
+          doctor_id: currentDoctor.id,
+          status: 'waiting',
+          priority: 'normal',
+          notes: '[COUNTER] Walk-in patient',
+        }])
+        .select('*, departments(name, code)')
+        .single();
+
+      if (insertError) throw insertError;
+
+      setSuccessMsg(`Quick token ${newTicket.token_number} generated.`);
+      setSelectedTicketForPrint(newTicket as QueueTicket);
+      void fetchDoctorQueue(currentDoctor.department_id, currentDoctor.id);
+    } catch (err: unknown) {
+      setErrorMsg(getErrorMessage(err, 'Failed to generate quick walk-in token'));
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
     // Trigger Pause Button: If live, open modal. If paused, instantly resume.
   const handleTogglePauseClick = async () => {
     if (!currentDoctor) return;
@@ -909,6 +949,17 @@ export default function ReceptionDeskPage() {
             >
               <UserPlus className="h-3.5 w-3.5 shrink-0 sm:h-4 sm:w-4" />
               <span className="truncate">+ Add Walk-In</span>
+            </button>
+
+            {/* Zero-typing walk-in token */}
+            <button
+              onClick={() => setShowQuickTokenModal(true)}
+              disabled={actionLoading || !currentDoctor}
+              className="flex min-w-0 items-center justify-center gap-1 rounded-xl border border-emerald-200 bg-emerald-50 px-1.5 py-2 text-[10px] font-bold text-emerald-700 transition-colors hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50 sm:gap-1.5 sm:px-2.5 sm:py-2.5 sm:text-xs lg:gap-2 lg:px-4"
+              title="Generate a token without entering patient details"
+            >
+              <Printer className="h-3.5 w-3.5 shrink-0 sm:h-4 sm:w-4" />
+              <span className="truncate">Quick Token</span>
             </button>
 
             {/* Log Out Button */}
@@ -2297,6 +2348,51 @@ export default function ReceptionDeskPage() {
                 className="cursor-pointer rounded-xl bg-blue-600 px-4 py-2.5 text-xs font-bold text-white shadow-md hover:bg-blue-700"
               >
                 Yes, Log Out
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {showQuickTokenModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-xs">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="quick-token-confirmation-title"
+            className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl"
+          >
+            <div className="flex flex-col items-center text-center">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-50 text-emerald-600">
+                <Printer className="h-5 w-5" />
+              </div>
+              <div className="mt-4">
+                <h3 id="quick-token-confirmation-title" className="text-base font-bold text-slate-900">
+                  Generate a quick token?
+                </h3>
+                <p className="mt-2 text-xs leading-5 text-slate-500">
+                  This will immediately create a token for a walk-in patient without entering patient details.
+                </p>
+              </div>
+            </div>
+            <div className="mt-6 flex justify-center gap-3">
+              <button
+                type="button"
+                onClick={() => setShowQuickTokenModal(false)}
+                disabled={actionLoading}
+                className="cursor-pointer rounded-xl border border-slate-300 px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowQuickTokenModal(false);
+                  void handleQuickWalkin();
+                }}
+                disabled={actionLoading}
+                className="cursor-pointer rounded-xl bg-emerald-600 px-4 py-2.5 text-xs font-bold text-white shadow-md hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Yes, Generate Token
               </button>
             </div>
           </div>
