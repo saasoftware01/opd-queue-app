@@ -1,6 +1,8 @@
 export const OPD_SHIFTS = ['Morning', 'Afternoon', 'Evening', 'Night'] as const;
+export const OPD_SESSION_SHIFTS = ['Morning', 'Evening'] as const;
 
 export type OpdShift = (typeof OPD_SHIFTS)[number];
+export type OpdSessionShift = (typeof OPD_SESSION_SHIFTS)[number];
 
 export interface OpdSession {
   shift: OpdShift;

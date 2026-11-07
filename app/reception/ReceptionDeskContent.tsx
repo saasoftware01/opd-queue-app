@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useSearchParams, useRouter, usePathname } from 'next/navigation';
 import { supabase } from '@/lib/supabase/client';
 
@@ -38,13 +38,16 @@ import {
   formatLegacyOpdTiming,
   formatOpdSessions,
   getOpdSessions,
+  OPD_SESSION_SHIFTS,
   OPD_TIME_OPTIONS,
   OPD_SHIFTS,
+  OpdSessionShift,
   OpdSession,
 } from '@/lib/opd-schedule';
 import { getErrorMessage } from '@/lib/error-message';
 
 interface ExtendedDoctor extends Doctor {
+  clinic_id?: string | null;
   clinic_name?: string;
   consultation_fee?: number;
   opd_timing?: string;
@@ -140,6 +143,46 @@ export default function ReceptionDeskPage() {
   const [actionLoading, setActionLoading] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string>('');
   const [successMsg, setSuccessMsg] = useState<string>('');
+  const callChimeAudioContextRef = useRef<AudioContext | null>(null);
+
+  const prepareCallChime = () => {
+    if (!window.AudioContext) return null;
+
+    try {
+      const audioContext = callChimeAudioContextRef.current || new window.AudioContext();
+      callChimeAudioContextRef.current = audioContext;
+      const ready = audioContext.resume().then(
+        () => true,
+        (error: unknown) => {
+          console.error('Unable to enable the reception call chime:', error);
+          return false;
+        }
+      );
+      return { audioContext, ready };
+    } catch (error: unknown) {
+      console.error('Unable to initialize the reception call chime:', error);
+      return null;
+    }
+  };
+
+  const playReceptionCallChime = (audioContext: AudioContext) => {
+    if (audioContext.state !== 'running') return;
+
+    [880, 1175, 880].forEach((frequency, index) => {
+      const startTime = audioContext.currentTime + index * 0.22;
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      oscillator.type = 'sine';
+      oscillator.frequency.value = frequency;
+      gain.gain.setValueAtTime(0.0001, startTime);
+      gain.gain.exponentialRampToValueAtTime(0.35, startTime + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, startTime + 0.18);
+      oscillator.connect(gain);
+      gain.connect(audioContext.destination);
+      oscillator.start(startTime);
+      oscillator.stop(startTime + 0.19);
+    });
+  };
 
   useEffect(() => {
     if (!errorMsg) return;
@@ -154,6 +197,11 @@ export default function ReceptionDeskPage() {
     const timeout = window.setTimeout(() => setSuccessMsg(''), 5000);
     return () => window.clearTimeout(timeout);
   }, [successMsg]);
+
+  useEffect(() => () => {
+    void callChimeAudioContextRef.current?.close();
+    callChimeAudioContextRef.current = null;
+  }, []);
 
     // Emergency Broadcast State
     const isOpdPaused = currentDoctor?.opd_status === 'PAUSED';
@@ -182,8 +230,26 @@ export default function ReceptionDeskPage() {
     async function loadInitialData() {
       try {
         setLoading(true);
+        const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+        if (sessionError) throw sessionError;
+        if (!session) {
+          router.replace('/login');
+          return;
+        }
+
+        const { data: clinics, error: clinicsError } = await supabase
+          .from('clinics')
+          .select('id')
+          .eq('owner_id', session.user.id);
+
+        if (clinicsError) throw clinicsError;
+        const clinicIds = (clinics || []).map((clinic) => clinic.id);
+        if (clinicIds.length === 0) {
+          throw new Error('This account is not associated with a clinic. Sign in with a clinic owner account.');
+        }
+
         const [docRes, deptRes] = await Promise.all([
-          supabase.from('doctors').select('*, departments(*)').order('name'),
+          supabase.from('doctors').select('*, departments(*)').in('clinic_id', clinicIds).order('name'),
           supabase.from('departments').select('*').order('name')
         ]);
 
@@ -210,7 +276,7 @@ export default function ReceptionDeskPage() {
     }
 
     loadInitialData();
-  }, [urlDoctorId]);
+  }, [router, urlDoctorId]);
 
   // 2. Doctor selection change handler
   useEffect(() => {
@@ -452,6 +518,7 @@ export default function ReceptionDeskPage() {
       return;
     }
 
+    const callChime = prepareCallChime();
     setActionLoading(true);
     setErrorMsg('');
     setSuccessMsg('');
@@ -470,7 +537,35 @@ export default function ReceptionDeskPage() {
 
       if (error) throw error;
 
+      if (callChime && await callChime.ready) {
+        playReceptionCallChime(callChime.audioContext);
+      }
+
       setSuccessMsg(`Called Token ${nextTicket.token_number} (${nextTicket.patient_name})`);
+      try {
+        const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+        if (sessionError) throw sessionError;
+        if (!session?.access_token) throw new Error('Your staff session has expired.');
+
+        const pushResponse = await fetch('/api/push/called', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${session.access_token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ ticketId: nextTicket.id }),
+        });
+        if (!pushResponse.ok) {
+          const result = await pushResponse.json() as { error?: string; details?: string; code?: string };
+          const diagnostic = [result.code, result.details].filter(Boolean).join(': ');
+          throw new Error(
+            [result.error || 'Background alert could not be sent.', diagnostic].filter(Boolean).join(' ')
+          );
+        }
+      } catch (pushError: unknown) {
+        console.error('Patient call push notification failed:', pushError);
+        setErrorMsg(`Token ${nextTicket.token_number} was called successfully, but the patient background notification failed: ${getErrorMessage(pushError, 'Unknown push delivery error')}`);
+      }
       fetchDoctorQueue(currentDoctor.department_id, currentDoctor.id);
     } catch (err: unknown) {
       setErrorMsg(getErrorMessage(err, 'Failed to call next patient'));
@@ -1203,13 +1298,13 @@ export default function ReceptionDeskPage() {
             </div>
 
             {/* OVERSIZED SINGLE-TAP DESK ACTIONS */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-4 border-t border-slate-100">
+            <div className="grid grid-cols-1 gap-3 border-t border-slate-100 pt-4 sm:grid-cols-3">
               <button
                 onClick={handleCallNext}
                 disabled={actionLoading || queueTickets.length === 0 || !!currentPatient}
-                className="py-4 px-6 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-base shadow-md flex items-center justify-center gap-2 transition-all disabled:opacity-40 cursor-pointer"
+                className="flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-6 py-4 text-base font-black text-white shadow-md transition-all hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40"
               >
-                <UserCheck className="w-5 h-5" />
+                <UserCheck className="h-5 w-5" />
                 <span>Call Next ➔</span>
               </button>
 
@@ -2159,10 +2254,10 @@ export default function ReceptionDeskPage() {
               <div>
                 <div className="mb-2">
                   <h4 className="text-xs font-bold text-slate-700 uppercase">Consultation Sessions</h4>
-                  <p className="mt-1 text-[11px] text-slate-400">Add a shift, then set its start and end time.</p>
+                  <p className="mt-1 text-[11px] text-slate-400">Add a morning or evening session, then choose its start and end time.</p>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
-                  {OPD_SHIFTS.map((shift) => {
+                  {OPD_SESSION_SHIFTS.map((shift) => {
                     const isAdded = newOpdSessions.some((session) => session.shift === shift);
                     return (
                       <button
@@ -2171,11 +2266,9 @@ export default function ReceptionDeskPage() {
                         disabled={isAdded}
                         onClick={() => {
                           setTimingError('');
-                          const defaultTimes: Record<typeof shift, [string, string]> = {
+                          const defaultTimes: Record<OpdSessionShift, [string, string]> = {
                             Morning: ['09:00', '12:00'],
-                            Afternoon: ['13:00', '16:00'],
                             Evening: ['17:00', '20:30'],
-                            Night: ['20:00', '23:00'],
                           };
                           const [start_time, end_time] = defaultTimes[shift];
                           setNewOpdSessions((sessions) => [...sessions, { shift, start_time, end_time }]

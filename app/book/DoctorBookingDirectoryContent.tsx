@@ -13,6 +13,7 @@ import {
   Clock, 
   IndianRupee, 
   Ticket, 
+  Bell,
   User, 
   Phone, 
   CheckCircle2, 
@@ -141,6 +142,17 @@ const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', '
 const PATIENT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const PATIENT_ACTIVITY_STORAGE_KEY = 'opd-queue-patient-last-activity';
 
+function urlBase64ToUint8Array(value: string): ArrayBuffer {
+  const padding = '='.repeat((4 - (value.length % 4)) % 4);
+  const base64 = (value + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = window.atob(base64);
+  const output = new Uint8Array(rawData.length);
+  for (let index = 0; index < rawData.length; index += 1) {
+    output[index] = rawData.charCodeAt(index);
+  }
+  return output.buffer;
+}
+
 function getDoctorClosureReason(
   doctor: Pick<DoctorDirectoryItem, 'weekly_off_days' | 'opd_holiday_dates'>,
   date = new Date()
@@ -185,6 +197,8 @@ function DoctorBookingDirectoryContent() {
   const [loading, setLoading] = useState(true);
   const [directoryRefreshKey, setDirectoryRefreshKey] = useState(0);
   const [queueRefreshFailed, setQueueRefreshFailed] = useState(false);
+  const [scheduleUpdateToast, setScheduleUpdateToast] = useState('');
+  const scheduleSnapshotRef = useRef<Map<string, string> | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [currentTime, setCurrentTime] = useState(() => new Date());
   
@@ -494,6 +508,7 @@ function DoctorBookingDirectoryContent() {
   const [confirmedTicket, setConfirmedTicket] = useState<ConfirmedTicket | null>(null);
   const [trackedDoctor, setTrackedDoctor] = useState<TrackedDoctorStatus | null>(null);
   const [cancelLoading, setCancelLoading] = useState(false);
+  const [callAlertMessage, setCallAlertMessage] = useState('');
 
   // Live queue tracking counters
   const [nowServingToken, setNowServingToken] = useState<string | null>(null);
@@ -507,10 +522,110 @@ function DoctorBookingDirectoryContent() {
   const [ratingSaving, setRatingSaving] = useState(false);
   const [ratingMessage, setRatingMessage] = useState('');
 
+  const enableCallAlerts = async () => {
+    setCallAlertMessage('');
+
+    try {
+      if (!confirmedTicket) throw new Error('Open an active ticket before enabling alerts.');
+
+      const vapidPublicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
+      const supportsPush = 'serviceWorker' in navigator
+        && 'PushManager' in window
+        && 'Notification' in window;
+      const permissionPromise = currentUser && vapidPublicKey && supportsPush
+        ? Notification.permission === 'granted'
+          ? Promise.resolve('granted' as NotificationPermission)
+          : Notification.requestPermission()
+        : null;
+
+      if (!currentUser) {
+        setCallAlertMessage('Sign in with the account registered to this ticket to enable notifications.');
+        return;
+      }
+
+      if (!vapidPublicKey) {
+        setCallAlertMessage('Background notifications need server push configuration.');
+        return;
+      }
+
+      if (!supportsPush) {
+        setCallAlertMessage('This browser does not support background notifications.');
+        return;
+      }
+
+      const permission = await permissionPromise;
+      if (permission !== 'granted') {
+        setCallAlertMessage('Allow notifications in your browser to receive call alerts.');
+        return;
+      }
+
+      const registration = await navigator.serviceWorker.register('/sw.js');
+      const pushManager = registration.pushManager;
+      const existingSubscription = await pushManager.getSubscription();
+      const subscription = existingSubscription || await pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(vapidPublicKey),
+      });
+      const { data: { session }, error: sessionError } = await patientSupabase.auth.getSession();
+      if (sessionError) throw sessionError;
+      if (!session?.access_token) {
+        setCallAlertMessage('Sign in again to enable background notifications.');
+        return;
+      }
+
+      const response = await fetch('/api/push/subscriptions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          ticketId: confirmedTicket?.id,
+          subscription: subscription.toJSON(),
+        }),
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error || 'Unable to enable background alerts.');
+
+      setCallAlertMessage('Call alerts are enabled on this device.');
+    } catch (error: unknown) {
+      console.error('Enabling patient call alerts failed:', error);
+      setCallAlertMessage(getErrorMessage(error, 'Could not enable call alerts.'));
+    }
+  };
+
   useEffect(() => {
-    const clock = window.setInterval(() => setCurrentTime(new Date()), 30_000);
-    return () => window.clearInterval(clock);
+    let clockTimeout: number;
+
+    const refreshClock = () => {
+      setCurrentTime(new Date());
+      clockTimeout = window.setTimeout(
+        refreshClock,
+        60_000 - (Date.now() % 60_000) + 10
+      );
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== 'visible') return;
+      window.clearTimeout(clockTimeout);
+      refreshClock();
+    };
+
+    refreshClock();
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.clearTimeout(clockTimeout);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
   }, []);
+
+  useEffect(() => {
+    if (!scheduleUpdateToast) return;
+
+    const timeout = window.setTimeout(() => setScheduleUpdateToast(''), 4000);
+    return () => window.clearTimeout(timeout);
+  }, [scheduleUpdateToast]);
 
   // 1. Fetch all doctors and their live queue metrics for today
   useEffect(() => {
@@ -596,6 +711,29 @@ function DoctorBookingDirectoryContent() {
           };
         });
 
+        const nextScheduleSnapshot = new Map(
+          formatted.map((doctor) => [
+            doctor.id,
+            JSON.stringify([
+              doctor.opd_shift,
+              doctor.opd_timing,
+              doctor.opd_sessions,
+              doctor.weekly_off_days,
+              doctor.opd_holiday_dates,
+            ]),
+          ])
+        );
+        const previousScheduleSnapshot = scheduleSnapshotRef.current;
+        const scheduleChanged = previousScheduleSnapshot
+          && formatted.some((doctor) => {
+            const previousSchedule = previousScheduleSnapshot.get(doctor.id);
+            return previousSchedule !== undefined
+              && previousSchedule !== nextScheduleSnapshot.get(doctor.id);
+          });
+
+        scheduleSnapshotRef.current = nextScheduleSnapshot;
+        if (scheduleChanged) setScheduleUpdateToast('OPD schedule updated successfully.');
+
         setDoctors(formatted);
 
         if (urlDoctorId) {
@@ -629,22 +767,32 @@ function DoctorBookingDirectoryContent() {
 
       try {
         const { start, end } = getClinicDayRange();
-        const { data, error } = await patientSupabase
-          .from('tickets')
-          .select('doctor_id, status, token_number, patient_name')
-          .gte('created_at', start)
-          .lt('created_at', end);
+        const [ticketsResult, ratingsResult] = await Promise.all([
+          patientSupabase
+            .from('tickets')
+            .select('doctor_id, status, token_number, patient_name')
+            .gte('created_at', start)
+            .lt('created_at', end),
+          patientSupabase
+            .from('tickets')
+            .select('doctor_id, rating')
+            .eq('status', 'completed')
+            .not('rating', 'is', null),
+        ]);
 
-        if (error) throw error;
+        if (ticketsResult.error) throw ticketsResult.error;
+        if (ratingsResult.error) throw ratingsResult.error;
         if (!isActive) return;
         setQueueRefreshFailed(false);
 
-        const tickets = (data || []) as QueueMetricTicket[];
+        const tickets = (ticketsResult.data || []) as QueueMetricTicket[];
+        const ratingTickets = (ratingsResult.data || []) as DoctorRatingTicket[];
         const metricsByDoctor = new Map<string, {
           waitingCount: number;
           currentToken: string | null;
           currentPatientName: string | null;
         }>();
+        const ratingByDoctor = new Map<string, { total: number; count: number }>();
 
         tickets.forEach((ticket) => {
           if (!ticket.doctor_id) return;
@@ -662,13 +810,23 @@ function DoctorBookingDirectoryContent() {
           metricsByDoctor.set(ticket.doctor_id, metrics);
         });
 
+        ratingTickets.forEach((ticket) => {
+          if (!ticket.doctor_id || ticket.rating == null) return;
+          const rating = ratingByDoctor.get(ticket.doctor_id) || { total: 0, count: 0 };
+          rating.total += ticket.rating;
+          rating.count += 1;
+          ratingByDoctor.set(ticket.doctor_id, rating);
+        });
+
         setDoctors((currentDoctors) => currentDoctors.map((doctor) => {
           const metrics = metricsByDoctor.get(doctor.id);
+          const rating = ratingByDoctor.get(doctor.id);
           return {
             ...doctor,
             waiting_count: metrics?.waitingCount || 0,
             current_token: metrics?.currentToken || null,
             current_patient_name: metrics?.currentPatientName || null,
+            rating: rating ? rating.total / rating.count : 3,
           };
         }));
       } catch (error: unknown) {
@@ -931,6 +1089,7 @@ function DoctorBookingDirectoryContent() {
             clinic_id: selectedDoctor.clinic_id || null,
             doctor_id: selectedDoctor.id,
             department_id: selectedDoctor.department_id,
+            patient_user_id: currentUser.id,
             token_number: 'T',
             patient_name: patientName.trim(),
             phone_number: cleanPhone,
@@ -1091,7 +1250,25 @@ function DoctorBookingDirectoryContent() {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 pb-16">
-      
+      {scheduleUpdateToast && (
+        <div
+          className="fixed right-4 top-4 z-50 flex max-w-sm items-center gap-2 rounded-xl border border-emerald-200 bg-white px-4 py-3 text-sm font-semibold text-emerald-800 shadow-lg"
+          role="status"
+          aria-live="polite"
+        >
+          <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-600" />
+          <span className="flex-1">{scheduleUpdateToast}</span>
+          <button
+            type="button"
+            onClick={() => setScheduleUpdateToast('')}
+            aria-label="Dismiss schedule update notification"
+            className="text-emerald-600 hover:text-emerald-800"
+          >
+            <XCircle className="h-4 w-4" />
+          </button>
+        </div>
+      )}
+
       {/* Header Banner */}
       <header className="bg-slate-950 text-white border-b border-slate-800">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 py-5 sm:py-8">
@@ -1293,6 +1470,27 @@ function DoctorBookingDirectoryContent() {
                   {confirmedTicket.token_number}
                 </span>
               </div>
+
+              {['waiting', 'in-consultation'].includes(confirmedTicket.status) && (
+                <div className="rounded-2xl border border-blue-100 bg-blue-50/70 p-4 text-center">
+                  <p className="text-xs font-semibold text-slate-700">
+                    Get an alert as soon as reception calls your token.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => void enableCallAlerts()}
+                    className="mt-3 inline-flex min-h-10 items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-xs font-bold text-white shadow-sm transition-colors hover:bg-blue-700"
+                  >
+                    <Bell className="h-4 w-4" />
+                    Enable call alerts
+                  </button>
+                  {callAlertMessage && (
+                    <p className="mt-2 text-[11px] font-medium text-slate-600" role="status">
+                      {callAlertMessage}
+                    </p>
+                  )}
+                </div>
+              )}
 
               {/* LIVE QUEUE OR COMPLETED SUMMARY */}
               {confirmedTicket.status === 'expired' ? (
@@ -1574,7 +1772,7 @@ function DoctorBookingDirectoryContent() {
 
             {queueRefreshFailed && (
               <p className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800" role="status">
-                Live queue data could not be refreshed. Retrying automatically.
+                Live doctor card data could not be refreshed. Retrying automatically.
               </p>
             )}
 

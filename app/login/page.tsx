@@ -45,45 +45,49 @@ export default function LoginPage() {
       const userEmail = authData.user.email?.toLowerCase() || '';
 
       // 2. Fetch Clinic associated with this owner
-      const { data: clinic } = await supabase
+      const { data: clinic, error: clinicError } = await supabase
         .from('clinics')
         .select('id, name, type')
         .eq('owner_id', authData.user.id)
         .maybeSingle();
 
+      if (clinicError) throw clinicError;
+      if (!clinic) {
+        throw new Error('No clinic is associated with this account. Register a clinic or contact support.');
+      }
+
       let targetDoctorId: string | null = null;
 
       // 3. Resolve the target doctor for this clinic owner
-      if (clinic) {
-        // First priority: Doctor already linked to this clinic
-        const { data: docLinked } = await supabase
+      // First priority: Doctor already linked to this clinic
+      const { data: docLinked } = await supabase
+        .from('doctors')
+        .select('id, name')
+        .eq('clinic_id', clinic.id)
+        .maybeSingle();
+
+      if (docLinked) {
+        targetDoctorId = docLinked.id;
+      } else {
+        // If not linked yet, match by doctor name corresponding to email
+        const searchKeyword = userEmail.includes('aafaque')
+          ? 'Aafaque'
+          : userEmail.split('@')[0];
+
+        const { data: matchedDoc } = await supabase
           .from('doctors')
           .select('id, name')
-          .eq('clinic_id', clinic.id)
+          .is('clinic_id', null)
+          .ilike('name', `%${searchKeyword}%`)
           .maybeSingle();
 
-        if (docLinked) {
-          targetDoctorId = docLinked.id;
-        } else {
-          // If not linked yet, match by doctor name corresponding to email
-          const searchKeyword = userEmail.includes('aafaque') 
-            ? 'Aafaque' 
-            : userEmail.split('@')[0];
-
-          const { data: matchedDoc } = await supabase
+        if (matchedDoc) {
+          targetDoctorId = matchedDoc.id;
+          // Auto-heal the link in the database so this link stays permanent
+          await supabase
             .from('doctors')
-            .select('id, name')
-            .ilike('name', `%${searchKeyword}%`)
-            .maybeSingle();
-
-          if (matchedDoc) {
-            targetDoctorId = matchedDoc.id;
-            // Auto-heal the link in the database so this link stays permanent
-            await supabase
-              .from('doctors')
-              .update({ clinic_id: clinic.id })
-              .eq('id', matchedDoc.id);
-          }
+            .update({ clinic_id: clinic.id })
+            .eq('id', matchedDoc.id);
         }
       }
 

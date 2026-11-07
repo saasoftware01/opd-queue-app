@@ -110,6 +110,13 @@ exception
   when duplicate_object then null;
 end $$;
 
+do $$
+begin
+  alter publication supabase_realtime add table public.departments;
+exception
+  when duplicate_object then null;
+end $$;
+
 -- 8. Seed Sample Data (Departments & Doctors)
 insert into public.departments (name, code, description) values
   ('General Medicine', 'GEN', 'Primary care and general consultations'),
