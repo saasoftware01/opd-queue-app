@@ -1,4 +1,4 @@
-export type TicketStatus = 'waiting' | 'in-consultation' | 'completed' | 'skipped' | 'cancelled';
+export type TicketStatus = 'waiting' | 'in-consultation' | 'completed' | 'skipped' | 'cancelled' | 'expired';
 export type PriorityType = 'normal' | 'emergency' | 'senior';
 
 export interface Department {

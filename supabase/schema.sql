@@ -37,7 +37,7 @@ alter table public.doctors
   add column if not exists opd_holiday_dates date[] not null default '{}';
 
 -- 4. Ticket Status enum & Tickets / Queue table
-create type public.ticket_status as enum ('waiting', 'in-consultation', 'completed', 'skipped', 'cancelled');
+create type public.ticket_status as enum ('waiting', 'in-consultation', 'completed', 'skipped', 'cancelled', 'expired');
 create type public.priority_type as enum ('normal', 'emergency', 'senior');
 
 create table if not exists public.tickets (

@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { supabase } from '@/lib/supabase/client';
 import { Ticket, Doctor, Department } from '@/lib/types';
+import { getClinicDayRange } from '@/lib/clinic-day';
 import { getErrorMessage } from '@/lib/error-message';
 
 export default function DoctorDashboardPage() {
@@ -78,11 +79,14 @@ export default function DoctorDashboardPage() {
   async function fetchQueue(deptId: string, docId: string) {
     try {
       setLoading(true);
+      const { start, end } = getClinicDayRange();
       const { data, error } = await supabase
         .from('tickets')
         .select('*, departments(*), doctors(*)')
         .eq('department_id', deptId)
         .in('status', ['waiting', 'in-consultation'])
+        .gte('created_at', start)
+        .lt('created_at', end)
         .order('created_at', { ascending: true });
 
       if (error) throw error;
@@ -141,6 +145,22 @@ export default function DoctorDashboardPage() {
       isActive = false;
       supabase.removeChannel(channel);
     };
+  }, [currentDoctor]);
+
+  useEffect(() => {
+    if (!currentDoctor) return;
+
+    let timeout: number;
+    const scheduleNextDayRefresh = () => {
+      const { end } = getClinicDayRange();
+      timeout = window.setTimeout(() => {
+        void fetchQueue(currentDoctor.department_id, currentDoctor.id);
+        scheduleNextDayRefresh();
+      }, new Date(end).getTime() - Date.now() + 100);
+    };
+
+    scheduleNextDayRefresh();
+    return () => window.clearTimeout(timeout);
   }, [currentDoctor]);
 
   const handleCallNext = async () => {

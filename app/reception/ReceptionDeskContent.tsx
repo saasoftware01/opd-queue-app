@@ -32,6 +32,7 @@ import {
   ChevronRight
 } from 'lucide-react';
 import { Department, Doctor } from '@/lib/types';
+import { getClinicDateRange, getClinicDateString, getClinicDayRange } from '@/lib/clinic-day';
 import {
   formatCompactOpdSessions,
   formatLegacyOpdTiming,
@@ -64,7 +65,7 @@ interface QueueTicket {
   patient_gender?: string;
   department_id: string;
   doctor_id: string | null;
-  status: 'waiting' | 'in-consultation' | 'completed' | 'skipped';
+  status: 'waiting' | 'in-consultation' | 'completed' | 'skipped' | 'cancelled' | 'expired';
   priority: 'emergency' | 'senior' | 'normal';
   notes?: string;
   created_at: string;
@@ -85,20 +86,6 @@ interface QueueTicket {
 
 const HISTORY_PAGE_SIZE = 10;
 const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-
-function getLocalDateString(date = new Date()): string {
-  const localDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
-  return localDate.toISOString().slice(0, 10);
-}
-
-function getLocalDateRange(startDate: string, endDate: string): { start: string; end: string } {
-  const [startYear, startMonth, startDay] = startDate.split('-').map(Number);
-  const [endYear, endMonth, endDay] = endDate.split('-').map(Number);
-  return {
-    start: new Date(startYear, startMonth - 1, startDay).toISOString(),
-    end: new Date(endYear, endMonth - 1, endDay + 1).toISOString(),
-  };
-}
 
 function formatCurrency(amount: number): string {
   return `₹${amount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -121,13 +108,15 @@ export default function ReceptionDeskPage() {
   const [queueTickets, setQueueTickets] = useState<QueueTicket[]>([]);
   const [skippedTickets, setSkippedTickets] = useState<QueueTicket[]>([]);
   const [currentPatient, setCurrentPatient] = useState<QueueTicket | null>(null);
+  const [previousDayConsultation, setPreviousDayConsultation] = useState<QueueTicket | null>(null);
   const [activeReceptionSection, setActiveReceptionSection] = useState<'queue' | 'history'>('queue');
   const [todayCompletedCount, setTodayCompletedCount] = useState<number>(0);
   const [historyTickets, setHistoryTickets] = useState<QueueTicket[]>([]);
-  const [historyStartDate, setHistoryStartDate] = useState(getLocalDateString());
-  const [historyEndDate, setHistoryEndDate] = useState(getLocalDateString());
+  const [historyStartDate, setHistoryStartDate] = useState(getClinicDateString());
+  const [historyEndDate, setHistoryEndDate] = useState(getClinicDateString());
   const [historySearch, setHistorySearch] = useState('');
   const [historyPriority, setHistoryPriority] = useState<'all' | 'normal' | 'senior' | 'emergency'>('all');
+  const [historyStatus, setHistoryStatus] = useState<'all' | QueueTicket['status']>('all');
   const [historyPaymentMode, setHistoryPaymentMode] = useState<'all' | 'unrecorded' | 'CASH' | 'UPI' | 'CARD' | 'OTHER' | 'NONE'>('all');
   const [historyPage, setHistoryPage] = useState(0);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -151,6 +140,20 @@ export default function ReceptionDeskPage() {
   const [actionLoading, setActionLoading] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string>('');
   const [successMsg, setSuccessMsg] = useState<string>('');
+
+  useEffect(() => {
+    if (!errorMsg) return;
+
+    const timeout = window.setTimeout(() => setErrorMsg(''), 5000);
+    return () => window.clearTimeout(timeout);
+  }, [errorMsg]);
+
+  useEffect(() => {
+    if (!successMsg) return;
+
+    const timeout = window.setTimeout(() => setSuccessMsg(''), 5000);
+    return () => window.clearTimeout(timeout);
+  }, [successMsg]);
 
     // Emergency Broadcast State
     const isOpdPaused = currentDoctor?.opd_status === 'PAUSED';
@@ -256,22 +259,50 @@ export default function ReceptionDeskPage() {
   // Fetch queue items matching the active department/doctor
   async function fetchDoctorQueue(deptId: string, docId: string) {
     try {
-      const today = new Date().toISOString().split('T')[0];
+      const { start, end } = getClinicDayRange();
+
+      const { data: expiredTickets, error: expirationError } = await supabase
+        .from('tickets')
+        .update({ status: 'expired' })
+        .eq('department_id', deptId)
+        .lt('created_at', start)
+        .in('status', ['waiting', 'skipped'])
+        .select('id');
+
+      if (expirationError) throw expirationError;
+      if (expiredTickets?.length) {
+        setSuccessMsg(`Expired ${expiredTickets.length} unserved token${expiredTickets.length === 1 ? '' : 's'} from the previous day.`);
+      }
 
       const { data, error } = await supabase
         .from('tickets')
         .select('*, departments(name, code)')
         .eq('department_id', deptId)
-        .gte('created_at', `${today}T00:00:00.000Z`)
+        .gte('created_at', start)
+        .lt('created_at', end)
         .order('created_at', { ascending: true });
 
       if (error) throw error;
 
       const tickets: QueueTicket[] = (data as QueueTicket[]) || [];
 
+      const { data: previousActive, error: previousActiveError } = await supabase
+        .from('tickets')
+        .select('*, departments(name, code)')
+        .eq('department_id', deptId)
+        .eq('doctor_id', docId)
+        .eq('status', 'in-consultation')
+        .lt('created_at', start)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (previousActiveError) throw previousActiveError;
+
       // Find if this doctor is already consulting a patient
       const active = tickets.find((t) => t.status === 'in-consultation' && t.doctor_id === docId);
-      setCurrentPatient(active || null);
+      setPreviousDayConsultation((previousActive as QueueTicket | null) || null);
+      setCurrentPatient((previousActive as QueueTicket | null) || active || null);
 
       // Track completed patients today for clinic metrics
       const completed = tickets.filter((t) => t.status === 'completed');
@@ -293,8 +324,25 @@ export default function ReceptionDeskPage() {
       setSkippedTickets(skipped);
     } catch (err: unknown) {
       console.error('Queue load error:', err);
+      setErrorMsg(getErrorMessage(err, 'Failed to refresh the queue for the new clinic day.'));
     }
   }
+
+  useEffect(() => {
+    if (!currentDoctor) return;
+
+    let timeout: number;
+    const scheduleNextDayRefresh = () => {
+      const { end } = getClinicDayRange();
+      timeout = window.setTimeout(() => {
+        void fetchDoctorQueue(currentDoctor.department_id, currentDoctor.id);
+        scheduleNextDayRefresh();
+      }, new Date(end).getTime() - Date.now() + 100);
+    };
+
+    scheduleNextDayRefresh();
+    return () => window.clearTimeout(timeout);
+  }, [currentDoctor]);
 
   const historyDoctorId = currentDoctor?.id;
   const historyDepartmentId = currentDoctor?.department_id;
@@ -302,17 +350,18 @@ export default function ReceptionDeskPage() {
 
   const applyHistoryPreset = (preset: 'today' | 'this-month' | 'previous-month' | 'this-year') => {
     const now = new Date();
-    const today = getLocalDateString(now);
+    const today = getClinicDateString(now);
+    const [year, month] = today.split('-').map(Number);
     let startDate = today;
     let endDate = today;
 
     if (preset === 'this-month') {
-      startDate = getLocalDateString(new Date(now.getFullYear(), now.getMonth(), 1));
+      startDate = getClinicDateString(new Date(Date.UTC(year, month - 1, 1)));
     } else if (preset === 'previous-month') {
-      startDate = getLocalDateString(new Date(now.getFullYear(), now.getMonth() - 1, 1));
-      endDate = getLocalDateString(new Date(now.getFullYear(), now.getMonth(), 0));
+      startDate = getClinicDateString(new Date(Date.UTC(year, month - 2, 1)));
+      endDate = getClinicDateString(new Date(Date.UTC(year, month - 1, 0)));
     } else if (preset === 'this-year') {
-      startDate = getLocalDateString(new Date(now.getFullYear(), 0, 1));
+      startDate = getClinicDateString(new Date(Date.UTC(year, 0, 1)));
     }
 
     setHistoryStartDate(startDate);
@@ -324,7 +373,7 @@ export default function ReceptionDeskPage() {
     if (!historyDoctorId || !historyDepartmentId || isHistoryRangeInvalid) return;
 
     let isActive = true;
-    const { start, end } = getLocalDateRange(historyStartDate, historyEndDate);
+    const { start, end } = getClinicDateRange(historyStartDate, historyEndDate);
 
     const loadHistory = async () => {
       setHistoryLoading(true);
@@ -342,10 +391,9 @@ export default function ReceptionDeskPage() {
             .select('*, departments(name, code), doctors(name, room_number)')
             .eq('department_id', historyDepartmentId)
             .eq('doctor_id', historyDoctorId)
-            .eq('status', 'completed')
-            .gte('completed_at', start)
-            .lt('completed_at', end)
-            .order('completed_at', { ascending: false })
+            .gte('created_at', start)
+            .lt('created_at', end)
+            .order('created_at', { ascending: false })
             .order('id', { ascending: false })
             .range(from, from + batchSize - 1);
 
@@ -479,6 +527,7 @@ export default function ReceptionDeskPage() {
       setSuccessMsg(`Consultation complete · ${currentPatient.token_number} · ${recordedAmount} recorded`);
       setShowCompleteModal(false);
       setCurrentPatient(null);
+      setPreviousDayConsultation(null);
       fetchDoctorQueue(currentDoctor.department_id, currentDoctor.id);
     } catch (err: unknown) {
       setCompletionError(getErrorMessage(err, 'Failed to complete consultation'));
@@ -507,6 +556,7 @@ export default function ReceptionDeskPage() {
 
       setSuccessMsg(`Put Token ${currentPatient.token_number} on hold / skipped`);
       setCurrentPatient(null);
+      setPreviousDayConsultation(null);
       fetchDoctorQueue(currentDoctor.department_id, currentDoctor.id);
     } catch (err: unknown) {
       setErrorMsg(getErrorMessage(err, 'Failed to hold ticket'));
@@ -788,6 +838,7 @@ export default function ReceptionDeskPage() {
     const query = historySearch.trim().toLowerCase();
 
     return historyTickets.filter((ticket) => {
+      if (historyStatus !== 'all' && ticket.status !== historyStatus) return false;
       if (historyPriority !== 'all' && ticket.priority !== historyPriority) return false;
       if (historyPaymentMode === 'unrecorded' && (ticket.paid_amount != null || ticket.payment_mode != null)) return false;
       if (historyPaymentMode !== 'all' && historyPaymentMode !== 'unrecorded' && ticket.payment_mode !== historyPaymentMode) return false;
@@ -800,17 +851,19 @@ export default function ReceptionDeskPage() {
         ticket.patient_age?.toString(),
         ticket.patient_gender,
         ticket.priority,
+        ticket.status,
         ticket.notes,
       ].some((value) => value?.toLowerCase().includes(query));
     });
-  }, [historyPaymentMode, historyPriority, historySearch, historyTickets]);
+  }, [historyPaymentMode, historyPriority, historySearch, historyStatus, historyTickets]);
 
   const historyPageCount = Math.max(1, Math.ceil(filteredHistoryTickets.length / HISTORY_PAGE_SIZE));
   const visibleHistoryTickets = filteredHistoryTickets.slice(
     historyPage * HISTORY_PAGE_SIZE,
     (historyPage + 1) * HISTORY_PAGE_SIZE
   );
-  const historyPaidTotal = filteredHistoryTickets.reduce((total, ticket) => total + (ticket.paid_amount ?? 0), 0);
+  const completedHistoryTickets = historyTickets.filter((ticket) => ticket.status === 'completed');
+  const completedHistoryPaidTotal = completedHistoryTickets.reduce((total, ticket) => total + (ticket.paid_amount ?? 0), 0);
 
   const handleDownloadHistory = () => {
     const columns = [
@@ -820,6 +873,7 @@ export default function ReceptionDeskPage() {
       'Age',
       'Gender',
       'Priority',
+      'Status',
       'Doctor',
       'Room',
       'Notes',
@@ -835,6 +889,7 @@ export default function ReceptionDeskPage() {
       ticket.patient_age ?? '',
       ticket.patient_gender || '',
       ticket.priority,
+      ticket.status,
       ticket.doctors?.name || currentDoctor?.name || '',
       ticket.doctors?.room_number || currentDoctor?.room_number || '',
       ticket.notes || '',
@@ -849,7 +904,7 @@ export default function ReceptionDeskPage() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `consultation-history-${historyStartDate}-to-${historyEndDate}.csv`;
+    link.download = `token-history-${historyStartDate}-to-${historyEndDate}.csv`;
     link.click();
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
   };
@@ -1004,6 +1059,16 @@ export default function ReceptionDeskPage() {
               <span>{successMsg}</span>
             </div>
             <button onClick={() => setSuccessMsg('')} className="text-emerald-500 hover:text-emerald-700 font-bold">&times;</button>
+          </div>
+        )}
+
+        {previousDayConsultation && (
+          <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-800">
+            <AlertCircle className="mt-0.5 h-5 w-5 shrink-0" />
+            <span>
+              Token {previousDayConsultation.token_number} from a previous clinic day is still marked in consultation.
+              Complete or hold it before calling another patient.
+            </span>
           </div>
         )}
 
@@ -1268,6 +1333,7 @@ export default function ReceptionDeskPage() {
               <h3 className="text-base font-bold text-slate-900">
                 Waiting Queue ({queueTickets.length})
                 {skippedTickets.length > 0 && ` · ${skippedTickets.length} on hold`}
+                {previousDayConsultation && ' · 1 from previous day'}
               </h3>
               <p className="text-xs text-slate-500">Sorted by Priority Tier & Arrival Timestamp</p>
             </div>
@@ -1299,19 +1365,21 @@ export default function ReceptionDeskPage() {
                       Loading synchronized queue...
                     </td>
                   </tr>
-                ) : queueTickets.length === 0 && skippedTickets.length === 0 ? (
+                ) : queueTickets.length === 0 && skippedTickets.length === 0 && !previousDayConsultation ? (
                   <tr>
                     <td colSpan={10} className="py-12 text-center text-slate-400 text-sm">
                       No patients waiting in queue. Click <span className="font-bold text-blue-600">&quot;+ Add Walk-In&quot;</span> to register an offline patient.
                     </td>
                   </tr>
                 ) : (
-                  [...queueTickets, ...skippedTickets].map((t, idx) => {
+                  [...(previousDayConsultation ? [previousDayConsultation] : []), ...queueTickets, ...skippedTickets].map((t) => {
                     const isSkipped = t.status === 'skipped';
+                    const isPreviousDayConsultation = t.id === previousDayConsultation?.id;
+                    const waitingPosition = queueTickets.findIndex((ticket) => ticket.id === t.id);
 
                     return (
-                    <tr key={t.id} className={`hover:bg-slate-50/80 transition-colors ${isSkipped ? 'bg-amber-50/40' : ''}`}>
-                      <td className="px-6 py-4 text-xs font-bold text-slate-400">{isSkipped ? '—' : idx + 1}</td>
+                    <tr key={t.id} className={`hover:bg-slate-50/80 transition-colors ${isPreviousDayConsultation ? 'bg-rose-50/60' : isSkipped ? 'bg-amber-50/40' : ''}`}>
+                      <td className="px-6 py-4 text-xs font-bold text-slate-400">{isSkipped || isPreviousDayConsultation ? '—' : waitingPosition + 1}</td>
                       <td className="px-6 py-4 whitespace-nowrap">
                         <span className="px-3 py-1 bg-slate-100 text-slate-900 font-mono font-black text-sm rounded-lg border border-slate-200">
                           {t.token_number}
@@ -1370,7 +1438,27 @@ export default function ReceptionDeskPage() {
                         })()}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
-                        {isSkipped ? (
+                        {isPreviousDayConsultation ? (
+                          <div className="space-y-2">
+                            <span className="block text-xs font-bold text-rose-700">In consultation · Previous day</span>
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={openCompletionModal}
+                                disabled={actionLoading}
+                                className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-sm disabled:opacity-50 cursor-pointer"
+                              >
+                                Complete
+                              </button>
+                              <button
+                                onClick={handleSkipOrHold}
+                                disabled={actionLoading}
+                                className="px-3 py-1.5 rounded-lg border border-amber-300 bg-amber-50 text-amber-800 text-xs font-bold hover:bg-amber-100 disabled:opacity-50 cursor-pointer"
+                              >
+                                Hold / Expire
+                              </button>
+                            </div>
+                          </div>
+                        ) : isSkipped ? (
                           <button
                             onClick={() => handleReactivate(t)}
                             disabled={actionLoading}
@@ -1379,7 +1467,9 @@ export default function ReceptionDeskPage() {
                             Reactivate
                           </button>
                         ) : (
-                          <span className="text-xs font-semibold text-emerald-700">Waiting</span>
+                          <span className={`text-xs font-semibold ${isPreviousDayConsultation ? 'text-rose-700' : 'text-emerald-700'}`}>
+                            {isPreviousDayConsultation ? 'In consultation · Previous day' : 'Waiting'}
+                          </span>
                         )}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-xs text-slate-600">
@@ -1404,20 +1494,22 @@ export default function ReceptionDeskPage() {
         </div>
         )}
 
-        {/* COMPLETED CONSULTATION HISTORY */}
+        {/* TICKET OUTCOME HISTORY */}
         {activeReceptionSection === 'history' && (
         <section className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden" aria-labelledby="history-title">
           <div className="px-6 py-4 border-b border-slate-200 bg-slate-50/50 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <h3 id="history-title" className="text-base font-bold text-slate-900">Consultation History</h3>
+              <h3 id="history-title" className="text-base font-bold text-slate-900">Token History</h3>
               <p className="text-xs text-slate-500">
-                Completed visits for {currentDoctor?.name || 'this doctor'} · {new Date(`${historyStartDate}T00:00:00`).toLocaleDateString()} – {new Date(`${historyEndDate}T00:00:00`).toLocaleDateString()}
+                Tokens issued to {currentDoctor?.name || 'this doctor'} · {new Date(`${historyStartDate}T00:00:00`).toLocaleDateString()} – {new Date(`${historyEndDate}T00:00:00`).toLocaleDateString()}
               </p>
             </div>
             <div className="flex items-center justify-between gap-4 sm:justify-end">
               <div className="text-right">
-                <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Recorded total</p>
-                <p className="text-sm font-black text-slate-900">{formatCurrency(historyPaidTotal)}</p>
+                <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">
+                  Completed visits · {completedHistoryTickets.length}
+                </p>
+                <p className="text-xs font-bold text-slate-700">Paid total: {formatCurrency(completedHistoryPaidTotal)}</p>
               </div>
               <button
                 type="button"
@@ -1439,7 +1531,7 @@ export default function ReceptionDeskPage() {
                   <input
                     type="date"
                     value={historyStartDate}
-                    max={historyEndDate < getLocalDateString() ? historyEndDate : getLocalDateString()}
+                    max={historyEndDate < getClinicDateString() ? historyEndDate : getClinicDateString()}
                     onChange={(event) => {
                       if (event.target.value) setHistoryStartDate(event.target.value);
                       setHistoryPage(0);
@@ -1453,7 +1545,7 @@ export default function ReceptionDeskPage() {
                     type="date"
                     value={historyEndDate}
                     min={historyStartDate}
-                    max={getLocalDateString()}
+                    max={getClinicDateString()}
                     onChange={(event) => {
                       if (event.target.value) setHistoryEndDate(event.target.value);
                       setHistoryPage(0);
@@ -1487,7 +1579,7 @@ export default function ReceptionDeskPage() {
             )}
           </div>
 
-          <div className="grid grid-cols-1 gap-3 border-b border-slate-200 p-4 sm:grid-cols-2 xl:grid-cols-3">
+          <div className="grid grid-cols-1 gap-3 border-b border-slate-200 p-4 sm:grid-cols-2 xl:grid-cols-4">
 
             <label className="block">
               <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">Search</span>
@@ -1504,6 +1596,26 @@ export default function ReceptionDeskPage() {
                   className="w-full rounded-xl border border-slate-300 bg-white py-2 pl-9 pr-3 text-xs text-slate-800 focus:border-blue-500 focus:outline-hidden focus:ring-2 focus:ring-blue-100"
                 />
               </div>
+            </label>
+
+            <label className="block">
+              <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">Outcome</span>
+              <select
+                value={historyStatus}
+                onChange={(event) => {
+                  setHistoryStatus(event.target.value as typeof historyStatus);
+                  setHistoryPage(0);
+                }}
+                className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-800 focus:border-blue-500 focus:outline-hidden focus:ring-2 focus:ring-blue-100"
+              >
+                <option value="all">All outcomes</option>
+                <option value="completed">Completed</option>
+                <option value="waiting">Waiting</option>
+                <option value="in-consultation">In consultation</option>
+                <option value="skipped">Skipped / on hold</option>
+                <option value="expired">Expired</option>
+                <option value="cancelled">Cancelled</option>
+              </select>
             </label>
 
             <label className="block">
@@ -1558,6 +1670,7 @@ export default function ReceptionDeskPage() {
                   <th className="px-4 py-3 text-left text-[10px] font-bold uppercase text-slate-500">Patient</th>
                   <th className="px-4 py-3 text-left text-[10px] font-bold uppercase text-slate-500">Age / Gender</th>
                   <th className="px-4 py-3 text-left text-[10px] font-bold uppercase text-slate-500">Priority</th>
+                  <th className="px-4 py-3 text-left text-[10px] font-bold uppercase text-slate-500">Status</th>
                   <th className="px-4 py-3 text-left text-[10px] font-bold uppercase text-slate-500">Doctor / Room</th>
                   <th className="px-4 py-3 text-left text-[10px] font-bold uppercase text-slate-500">Notes</th>
                   <th className="px-4 py-3 text-right text-[10px] font-bold uppercase text-slate-500">Amount Paid</th>
@@ -1568,11 +1681,11 @@ export default function ReceptionDeskPage() {
               </thead>
               <tbody className="divide-y divide-slate-100 bg-white">
                 {isHistoryRangeInvalid ? (
-                  <tr><td colSpan={10} className="py-10 text-center text-xs text-rose-600">Choose a valid date range to view completed visits.</td></tr>
+                  <tr><td colSpan={11} className="py-10 text-center text-xs text-rose-600">Choose a valid date range to view token outcomes.</td></tr>
                 ) : historyLoading ? (
-                  <tr><td colSpan={10} className="py-10 text-center text-xs font-semibold text-slate-400">Loading consultation history...</td></tr>
+                  <tr><td colSpan={11} className="py-10 text-center text-xs font-semibold text-slate-400">Loading token history...</td></tr>
                 ) : filteredHistoryTickets.length === 0 ? (
-                  <tr><td colSpan={10} className="py-10 text-center text-xs text-slate-400">No completed visits match this date and filter.</td></tr>
+                  <tr><td colSpan={11} className="py-10 text-center text-xs text-slate-400">No token outcomes match this date and filter.</td></tr>
                 ) : visibleHistoryTickets.map((ticket) => {
                   const cleanNotes = (ticket.notes || '')
                     .replace(/\[\s*(UPI|CASH)\s*\]?/gi, '')
@@ -1591,6 +1704,21 @@ export default function ReceptionDeskPage() {
                         {ticket.patient_age ?? '—'} / <span className="capitalize">{ticket.patient_gender?.replaceAll('-', ' ') || '—'}</span>
                       </td>
                       <td className="whitespace-nowrap px-4 py-3 text-xs capitalize text-slate-600">{ticket.priority}</td>
+                      <td className="whitespace-nowrap px-4 py-3">
+                        <span className={`rounded-full px-2.5 py-1 text-[10px] font-extrabold capitalize ${
+                          ticket.status === 'completed'
+                            ? 'bg-emerald-50 text-emerald-700'
+                            : ticket.status === 'expired' || ticket.status === 'cancelled'
+                              ? 'bg-slate-100 text-slate-600'
+                              : ticket.status === 'skipped'
+                                ? 'bg-amber-50 text-amber-700'
+                                : ticket.status === 'in-consultation'
+                                  ? 'bg-blue-50 text-blue-700'
+                                  : 'bg-indigo-50 text-indigo-700'
+                        }`}>
+                          {ticket.status.replaceAll('-', ' ')}
+                        </span>
+                      </td>
                       <td className="whitespace-nowrap px-4 py-3 text-xs text-slate-600">
                         {ticket.doctors?.name || currentDoctor?.name || '—'}<div className="text-[10px] text-slate-400">{ticket.doctors?.room_number || currentDoctor?.room_number || '—'}</div>
                       </td>
@@ -2173,7 +2301,7 @@ export default function ReceptionDeskPage() {
                   <input
                     id="opd-holiday-date"
                     type="date"
-                    min={getLocalDateString()}
+                    min={getClinicDateString()}
                     value={newHolidayDate}
                     onChange={(event) => setNewHolidayDate(event.target.value)}
                     className="min-w-0 flex-1 bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-xs font-semibold text-slate-900 focus:ring-2 focus:ring-blue-500"
@@ -2182,13 +2310,13 @@ export default function ReceptionDeskPage() {
                     type="button"
                     disabled={
                       !newHolidayDate ||
-                      newHolidayDate < getLocalDateString() ||
+                      newHolidayDate < getClinicDateString() ||
                       newHolidayDates.includes(newHolidayDate)
                     }
                     onClick={() => {
                       if (
                         !newHolidayDate ||
-                        newHolidayDate < getLocalDateString() ||
+                        newHolidayDate < getClinicDateString() ||
                         newHolidayDates.includes(newHolidayDate)
                       ) return;
                       setTimingError('');
