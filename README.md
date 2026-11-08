@@ -19,8 +19,9 @@ project's server-only service role key. Never expose the service role key to the
 Use the public and private keys from the same generated pair, paste only the key values,
 and restart the development server after changing `.env.local`.
 
-Patients must sign in with the account linked to their ticket and use the
-**Call alerts** toggle in the profile menu while viewing an active ticket.
+Patients must sign in and turn on **Call alerts** in the profile menu. The preference
+is saved per account on that device and automatically applies to active tickets linked
+to the signed-in account; turning the toggle off removes it for that device.
 The chime plays only on the reception device; the patient's mobile receives a silent push notification.
 Background push requires HTTPS, browser notification permission, and VAPID setup.
 On iOS, the patient portal must be added to the Home Screen for Web Push support.
