@@ -67,6 +67,21 @@ export async function POST(request: Request) {
     return Response.json({ error: 'Background push notifications are not configured.' }, { status: 503 });
   }
 
+  try {
+    setVapidDetails(vapidSubject, vapidPublicKey, vapidPrivateKey);
+  } catch (error) {
+    console.error('Push VAPID configuration is invalid:', error);
+    const message = error instanceof Error ? error.message : '';
+    const errorMessage = message.toLowerCase().includes('subject')
+      ? 'VAPID_SUBJECT must be a valid mailto: address or https:// URL; do not use localhost as the subject.'
+      : message.toLowerCase().includes('public key')
+        ? 'NEXT_PUBLIC_VAPID_PUBLIC_KEY must be the URL-safe Base64 public key from the generated VAPID key pair.'
+        : message.toLowerCase().includes('private key')
+          ? 'VAPID_PRIVATE_KEY must be the URL-safe Base64 private key from the same generated VAPID key pair.'
+          : 'Check that the VAPID subject and generated public/private key pair are valid.';
+    return Response.json({ error: errorMessage }, { status: 500 });
+  }
+
   const { error: dispatchError } = await auth.admin
     .from('patient_push_dispatches')
     .insert({ ticket_id: ticket.id, called_at: ticket.called_at });
@@ -79,7 +94,6 @@ export async function POST(request: Request) {
     return Response.json({ error: 'Unable to reserve the patient alert.' }, { status: 500 });
   }
 
-  setVapidDetails(vapidSubject, vapidPublicKey, vapidPrivateKey);
   const payload = JSON.stringify({
     title: 'It’s your turn',
     body: `Token ${ticket.token_number} has been called. Please proceed to the consultation room.`,

@@ -45,6 +45,7 @@ import {
   OpdSession,
 } from '@/lib/opd-schedule';
 import { getErrorMessage } from '@/lib/error-message';
+import { readPushNotificationResponse } from '@/lib/push-notification-response';
 
 interface ExtendedDoctor extends Doctor {
   clinic_id?: string | null;
@@ -555,11 +556,16 @@ export default function ReceptionDeskPage() {
           },
           body: JSON.stringify({ ticketId: nextTicket.id }),
         });
-        if (!pushResponse.ok) {
-          const result = await pushResponse.json() as { error?: string; details?: string; code?: string };
-          const diagnostic = [result.code, result.details].filter(Boolean).join(': ');
-          throw new Error(
-            [result.error || 'Background alert could not be sent.', diagnostic].filter(Boolean).join(' ')
+        const result = await readPushNotificationResponse(pushResponse);
+        if (result.duplicate) {
+          setErrorMsg(`Token ${nextTicket.token_number} was called, but its push alert was already processed.`);
+        } else if (result.sent === 0) {
+          setErrorMsg(
+            `Token ${nextTicket.token_number} was called successfully, but no patient device is subscribed for alerts. Enable Call alerts from the patient profile menu while this token is active.`
+          );
+        } else if (typeof result.sent === 'number') {
+          setSuccessMsg(
+            `Called Token ${nextTicket.token_number} (${nextTicket.patient_name}). Push submitted to ${result.sent} patient device(s).`
           );
         }
       } catch (pushError: unknown) {

@@ -68,8 +68,3 @@ export async function isClinicOwner(
   if (clinicError) throw clinicError;
   return clinic?.owner_id === userId;
 }
-
-export function getPushPhone(user: User): string {
-  const phone = user.user_metadata?.phone;
-  return typeof phone === 'string' ? phone.replace(/\D/g, '') : '';
-}

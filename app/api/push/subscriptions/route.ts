@@ -1,4 +1,4 @@
-import { authenticatePushRequest, getPushPhone, isPushAuthFailure } from '@/lib/server/push-auth';
+import { authenticatePushRequest, isPushAuthFailure } from '@/lib/server/push-auth';
 
 interface PushSubscriptionPayload {
   endpoint?: unknown;
@@ -6,6 +6,33 @@ interface PushSubscriptionPayload {
     auth?: unknown;
     p256dh?: unknown;
   };
+}
+
+export async function GET(request: Request) {
+  const auth = await authenticatePushRequest(request);
+  if (isPushAuthFailure(auth)) return auth.response;
+
+  const { searchParams } = new URL(request.url);
+  const ticketId = searchParams.get('ticketId');
+  const endpoint = searchParams.get('endpoint');
+  if (!ticketId || !endpoint?.startsWith('https://')) {
+    return Response.json({ error: 'A valid ticket and push endpoint are required.' }, { status: 400 });
+  }
+
+  const { data: subscription, error } = await auth.admin
+    .from('patient_push_subscriptions')
+    .select('id')
+    .eq('ticket_id', ticketId)
+    .eq('user_id', auth.user.id)
+    .eq('endpoint', endpoint)
+    .maybeSingle();
+
+  if (error) {
+    console.error('Push subscription status lookup failed:', error);
+    return Response.json({ error: 'Unable to check call alert settings.' }, { status: 500 });
+  }
+
+  return Response.json({ enabled: Boolean(subscription) });
 }
 
 export async function POST(request: Request) {
@@ -40,7 +67,7 @@ export async function POST(request: Request) {
 
   const { data: ticket, error: ticketError } = await auth.admin
     .from('tickets')
-    .select('patient_user_id, phone_number, status')
+    .select('patient_user_id, status')
     .eq('id', ticketId)
     .maybeSingle();
 
@@ -49,12 +76,8 @@ export async function POST(request: Request) {
     return Response.json({ error: 'Unable to verify this ticket.' }, { status: 500 });
   }
 
-  const ticketPhone = typeof ticket?.phone_number === 'string'
-    ? ticket.phone_number.replace(/\D/g, '')
-    : '';
-  const userPhone = getPushPhone(auth.user);
-  if (!ticket || ticket.patient_user_id !== auth.user.id || !userPhone || ticketPhone !== userPhone) {
-    return Response.json({ error: 'Sign in with the account registered to this ticket to enable alerts.' }, { status: 403 });
+  if (!ticket || ticket.patient_user_id !== auth.user.id) {
+    return Response.json({ error: 'This token is not linked to the signed-in account.' }, { status: 403 });
   }
 
   if (!['waiting', 'in-consultation'].includes(ticket.status)) {

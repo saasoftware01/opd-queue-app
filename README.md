@@ -16,10 +16,12 @@ Copy the VAPID public and private keys from `npx web-push generate-vapid-keys` i
 `NEXT_PUBLIC_VAPID_PUBLIC_KEY` and `VAPID_PRIVATE_KEY`. Set `VAPID_SUBJECT` to a
 valid `mailto:` or website contact, and set `SUPABASE_SERVICE_ROLE_KEY` to the
 project's server-only service role key. Never expose the service role key to the browser.
+Use the public and private keys from the same generated pair, paste only the key values,
+and restart the development server after changing `.env.local`.
 
-Patients must sign in with the account and phone number registered to their ticket
-and select **Enable call alerts** on the ticket screen. The chime plays only on
-the reception device; the patient's mobile receives a silent push notification.
+Patients must sign in with the account linked to their ticket and use the
+**Call alerts** toggle in the profile menu while viewing an active ticket.
+The chime plays only on the reception device; the patient's mobile receives a silent push notification.
 Background push requires HTTPS, browser notification permission, and VAPID setup.
 On iOS, the patient portal must be added to the Home Screen for Web Push support.
 

@@ -20,6 +20,7 @@ import { supabase } from '@/lib/supabase/client';
 import { Ticket, Doctor, Department } from '@/lib/types';
 import { getClinicDayRange } from '@/lib/clinic-day';
 import { getErrorMessage } from '@/lib/error-message';
+import { readPushNotificationResponse } from '@/lib/push-notification-response';
 
 export default function DoctorDashboardPage() {
   const [doctors, setDoctors] = useState<Doctor[]>([]);
@@ -194,6 +195,38 @@ export default function DoctorDashboardPage() {
       if (error) throw error;
 
       setSuccessMsg(`Called Token ${nextTicket.token_number} (${nextTicket.patient_name})`);
+      try {
+        const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+        if (sessionError) throw sessionError;
+        if (!session?.access_token) throw new Error('Your staff session has expired.');
+
+        const pushResponse = await fetch('/api/push/called', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${session.access_token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ ticketId: nextTicket.id }),
+        });
+        const result = await readPushNotificationResponse(pushResponse);
+        if (result.duplicate) {
+          setErrorMsg(`Token ${nextTicket.token_number} was called, but its push alert was already processed.`);
+        } else if (result.sent === 0) {
+          setErrorMsg(
+            `Token ${nextTicket.token_number} was called successfully, but no patient device is subscribed for alerts. Enable Call alerts from the patient profile menu while this token is active.`
+          );
+        } else if (typeof result.sent === 'number') {
+          setSuccessMsg(
+            `Called Token ${nextTicket.token_number} (${nextTicket.patient_name}). Push submitted to ${result.sent} patient device(s).`
+          );
+        }
+      } catch (pushError: unknown) {
+        console.error('Patient call push notification failed:', pushError);
+        setErrorMsg(
+          `Token ${nextTicket.token_number} was called successfully, but the patient background notification failed: ${getErrorMessage(pushError, 'Unknown push delivery error')}`
+        );
+      }
+
       fetchQueue(currentDoctor.department_id, currentDoctor.id);
     } catch (err: unknown) {
       setErrorMsg(getErrorMessage(err, 'Failed to call next patient'));

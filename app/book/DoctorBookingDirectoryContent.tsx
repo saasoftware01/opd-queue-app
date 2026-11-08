@@ -153,6 +153,16 @@ function urlBase64ToUint8Array(value: string): ArrayBuffer {
   return output.buffer;
 }
 
+function pushSubscriptionMatchesVapidKey(subscription: PushSubscription, publicKey: string): boolean {
+  const subscribedKey = subscription.options.applicationServerKey;
+  if (!subscribedKey) return false;
+
+  const expectedKey = new Uint8Array(urlBase64ToUint8Array(publicKey));
+  const actualKey = new Uint8Array(subscribedKey);
+  return expectedKey.length === actualKey.length
+    && expectedKey.every((value, index) => value === actualKey[index]);
+}
+
 function getDoctorClosureReason(
   doctor: Pick<DoctorDirectoryItem, 'weekly_off_days' | 'opd_holiday_dates'>,
   date = new Date()
@@ -509,6 +519,12 @@ function DoctorBookingDirectoryContent() {
   const [trackedDoctor, setTrackedDoctor] = useState<TrackedDoctorStatus | null>(null);
   const [cancelLoading, setCancelLoading] = useState(false);
   const [callAlertMessage, setCallAlertMessage] = useState('');
+  const [callAlertStatus, setCallAlertStatus] = useState<{ ticketId: string; enabled: boolean } | null>(null);
+  const [callAlertLoading, setCallAlertLoading] = useState(false);
+  const callAlertStatusRequestRef = useRef(0);
+  const callAlertTicketId = confirmedTicket?.id;
+  const callAlertTicketStatus = confirmedTicket?.status;
+  const callAlertsEnabled = callAlertStatus?.ticketId === callAlertTicketId && callAlertStatus?.enabled === true;
 
   // Live queue tracking counters
   const [nowServingToken, setNowServingToken] = useState<string | null>(null);
@@ -523,7 +539,9 @@ function DoctorBookingDirectoryContent() {
   const [ratingMessage, setRatingMessage] = useState('');
 
   const enableCallAlerts = async () => {
+    callAlertStatusRequestRef.current += 1;
     setCallAlertMessage('');
+    setCallAlertLoading(true);
 
     try {
       if (!confirmedTicket) throw new Error('Open an active ticket before enabling alerts.');
@@ -559,19 +577,42 @@ function DoctorBookingDirectoryContent() {
         return;
       }
 
-      const registration = await navigator.serviceWorker.register('/sw.js');
-      const pushManager = registration.pushManager;
-      const existingSubscription = await pushManager.getSubscription();
-      const subscription = existingSubscription || await pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(vapidPublicKey),
-      });
       const { data: { session }, error: sessionError } = await patientSupabase.auth.getSession();
       if (sessionError) throw sessionError;
       if (!session?.access_token) {
         setCallAlertMessage('Sign in again to enable background notifications.');
         return;
       }
+
+      const registration = await navigator.serviceWorker.register('/sw.js');
+      const pushManager = registration.pushManager;
+      let existingSubscription = await pushManager.getSubscription();
+      if (existingSubscription && !pushSubscriptionMatchesVapidKey(existingSubscription, vapidPublicKey)) {
+        const removeResponse = await fetch('/api/push/subscriptions', {
+          method: 'DELETE',
+          headers: {
+            Authorization: `Bearer ${session.access_token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            ticketId: confirmedTicket.id,
+            endpoint: existingSubscription.endpoint,
+          }),
+        });
+        const removeResult = await removeResponse.json() as { error?: string };
+        if (!removeResponse.ok) {
+          throw new Error(removeResult.error || 'Unable to replace the outdated browser alert subscription.');
+        }
+
+        const unsubscribed = await existingSubscription.unsubscribe();
+        if (!unsubscribed) throw new Error('Unable to replace the outdated browser alert subscription.');
+        existingSubscription = null;
+      }
+
+      const subscription = existingSubscription || await pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(vapidPublicKey),
+      });
 
       const response = await fetch('/api/push/subscriptions', {
         method: 'POST',
@@ -587,12 +628,111 @@ function DoctorBookingDirectoryContent() {
       const result = await response.json() as { error?: string };
       if (!response.ok) throw new Error(result.error || 'Unable to enable background alerts.');
 
+      setCallAlertStatus({ ticketId: confirmedTicket.id, enabled: true });
       setCallAlertMessage('Call alerts are enabled on this device.');
     } catch (error: unknown) {
       console.error('Enabling patient call alerts failed:', error);
       setCallAlertMessage(getErrorMessage(error, 'Could not enable call alerts.'));
+    } finally {
+      setCallAlertLoading(false);
     }
   };
+
+  const disableCallAlerts = async () => {
+    callAlertStatusRequestRef.current += 1;
+    setCallAlertMessage('');
+    setCallAlertLoading(true);
+
+    try {
+      if (!confirmedTicket) throw new Error('Open an active ticket before disabling alerts.');
+
+      const registration = await navigator.serviceWorker.getRegistration();
+      const subscription = await registration?.pushManager.getSubscription();
+      if (!subscription) {
+        setCallAlertStatus({ ticketId: confirmedTicket.id, enabled: false });
+        setCallAlertMessage('Call alerts are not enabled on this device.');
+        return;
+      }
+
+      const { data: { session }, error: sessionError } = await patientSupabase.auth.getSession();
+      if (sessionError) throw sessionError;
+      if (!session?.access_token) {
+        setCallAlertMessage('Sign in again to disable call alerts.');
+        return;
+      }
+
+      const response = await fetch('/api/push/subscriptions', {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          ticketId: confirmedTicket.id,
+          endpoint: subscription.endpoint,
+        }),
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error || 'Unable to disable call alerts.');
+
+      setCallAlertStatus({ ticketId: confirmedTicket.id, enabled: false });
+      setCallAlertMessage('Call alerts are disabled for this ticket on this device.');
+    } catch (error: unknown) {
+      console.error('Disabling patient call alerts failed:', error);
+      setCallAlertMessage(getErrorMessage(error, 'Could not disable call alerts.'));
+    } finally {
+      setCallAlertLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    let isCurrent = true;
+    const requestId = ++callAlertStatusRequestRef.current;
+    const activeTicket = callAlertTicketId
+      && ['waiting', 'in-consultation'].includes(callAlertTicketStatus || '');
+
+    if (!activeTicket || !currentUser) {
+      return () => {
+        isCurrent = false;
+      };
+    }
+
+    const checkCallAlerts = async () => {
+      try {
+        if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+        const registration = await navigator.serviceWorker.getRegistration();
+        const subscription = await registration?.pushManager.getSubscription();
+        if (!subscription) return;
+
+        const { data: { session }, error: sessionError } = await patientSupabase.auth.getSession();
+        if (sessionError) throw sessionError;
+        if (!session?.access_token) throw new Error('Sign in again to check call alert settings.');
+
+        const params = new URLSearchParams({
+          ticketId: callAlertTicketId,
+          endpoint: subscription.endpoint,
+        });
+        const response = await fetch(`/api/push/subscriptions?${params.toString()}`, {
+          headers: { Authorization: `Bearer ${session.access_token}` },
+        });
+        const result = await response.json() as { enabled?: boolean; error?: string };
+        if (!response.ok) throw new Error(result.error || 'Unable to check call alert settings.');
+        if (isCurrent && callAlertStatusRequestRef.current === requestId) {
+          setCallAlertStatus({ ticketId: callAlertTicketId, enabled: result.enabled === true });
+        }
+      } catch (error: unknown) {
+        console.error('Checking patient call alerts failed:', error);
+        if (isCurrent && callAlertStatusRequestRef.current === requestId) {
+          setCallAlertMessage(getErrorMessage(error, 'Could not check call alert settings.'));
+        }
+      }
+    };
+
+    void checkCallAlerts();
+    return () => {
+      isCurrent = false;
+    };
+  }, [callAlertTicketId, callAlertTicketStatus, currentUser]);
 
   useEffect(() => {
     let clockTimeout: number;
@@ -1353,6 +1493,48 @@ function DoctorBookingDirectoryContent() {
                         <span>Booking History</span>
                       </button>
                       <div className="my-1 border-t border-slate-100" />
+                      <div className="flex items-center justify-between gap-3 rounded-2xl px-3 py-3">
+                        <span className="flex min-w-0 items-center gap-3">
+                          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-amber-50 text-amber-600">
+                            <Bell className="h-4 w-4" />
+                          </span>
+                          <span className="min-w-0">
+                            <span className="block text-xs font-bold text-slate-700">Call alerts</span>
+                            <span className="block text-[10px] leading-4 text-slate-400">
+                              {confirmedTicket && ['waiting', 'in-consultation'].includes(confirmedTicket.status)
+                                ? 'For this active token'
+                                : 'Open an active token first'}
+                            </span>
+                          </span>
+                        </span>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-label="Call alerts"
+                          aria-checked={callAlertsEnabled}
+                          disabled={
+                            callAlertLoading
+                            || !confirmedTicket
+                            || !['waiting', 'in-consultation'].includes(confirmedTicket.status)
+                          }
+                          onClick={() => void (callAlertsEnabled ? disableCallAlerts() : enableCallAlerts())}
+                          className={`relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                            callAlertsEnabled ? 'bg-blue-600' : 'bg-slate-300'
+                          }`}
+                        >
+                          <span
+                            className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                              callAlertsEnabled ? 'left-[22px]' : 'left-0.5'
+                            }`}
+                          />
+                        </button>
+                      </div>
+                      {callAlertMessage && (
+                        <p className="px-3 pb-2 text-[10px] font-medium leading-4 text-slate-500" role="status">
+                          {callAlertMessage}
+                        </p>
+                      )}
+                      <div className="my-1 border-t border-slate-100" />
                       <button
                         type="button"
                         onClick={handlePatientLogout}
@@ -1470,27 +1652,6 @@ function DoctorBookingDirectoryContent() {
                   {confirmedTicket.token_number}
                 </span>
               </div>
-
-              {['waiting', 'in-consultation'].includes(confirmedTicket.status) && (
-                <div className="rounded-2xl border border-blue-100 bg-blue-50/70 p-4 text-center">
-                  <p className="text-xs font-semibold text-slate-700">
-                    Get an alert as soon as reception calls your token.
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => void enableCallAlerts()}
-                    className="mt-3 inline-flex min-h-10 items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-xs font-bold text-white shadow-sm transition-colors hover:bg-blue-700"
-                  >
-                    <Bell className="h-4 w-4" />
-                    Enable call alerts
-                  </button>
-                  {callAlertMessage && (
-                    <p className="mt-2 text-[11px] font-medium text-slate-600" role="status">
-                      {callAlertMessage}
-                    </p>
-                  )}
-                </div>
-              )}
 
               {/* LIVE QUEUE OR COMPLETED SUMMARY */}
               {confirmedTicket.status === 'expired' ? (
