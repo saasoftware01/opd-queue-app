@@ -1,10 +1,11 @@
 'use client';
 
 import React, { useState, useEffect, useMemo, useCallback, useRef, Suspense } from 'react';
+import { createPortal } from 'react-dom';
 import { useSearchParams } from 'next/navigation';
 import type { User as SupabaseUser } from '@supabase/supabase-js';
 import { patientSupabase } from '@/lib/supabase/patient-client';
-import { formatOpdSessions, getOpdSessions, OpdSession } from '@/lib/opd-schedule';
+import { formatCompactOpdSessions, formatOpdSessions, getOpdSessions, OpdSession } from '@/lib/opd-schedule';
 import { getClinicDateString, getClinicDateTimeParts, getClinicDayRange } from '@/lib/clinic-day';
 import { 
   Search, 
@@ -63,8 +64,6 @@ interface DoctorDirectoryRecord {
 interface QueueMetricTicket {
   doctor_id: string | null;
   status: string;
-  token_number: string | null;
-  patient_name: string | null;
 }
 
 interface DoctorRatingTicket {
@@ -99,8 +98,6 @@ interface DoctorDirectoryItem {
   department_id: string | null;
   department_name: string;
   waiting_count?: number;
-  current_token?: string | null;
-  current_patient_name?: string | null;
   opd_status?: string;
   broadcast_message?: string | null;
   rating: number;
@@ -217,6 +214,13 @@ function DoctorBookingDirectoryContent() {
   const scheduleSnapshotRef = useRef<Map<string, string> | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [currentTime, setCurrentTime] = useState(() => new Date());
+  const [scheduleTooltip, setScheduleTooltip] = useState<{
+    id: string;
+    text: string;
+    left: number;
+    top: number;
+    above: boolean;
+  } | null>(null);
   
   // Selected doctor for booking modal
   const [selectedDoctor, setSelectedDoctor] = useState<DoctorDirectoryItem | null>(null);
@@ -285,6 +289,57 @@ function DoctorBookingDirectoryContent() {
     document.addEventListener('pointerdown', closeProfileMenuOnOutsideClick);
     return () => document.removeEventListener('pointerdown', closeProfileMenuOnOutsideClick);
   }, [showProfileMenu]);
+
+  useEffect(() => {
+    if (!scheduleTooltip) return;
+
+    const closeOnOutsideClick = (event: PointerEvent) => {
+      if (
+        event.target instanceof Element
+        && !event.target.closest('[data-schedule-tooltip-trigger]')
+        && !event.target.closest('[data-schedule-tooltip]')
+      ) {
+        setScheduleTooltip(null);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setScheduleTooltip(null);
+    };
+    const closeOnViewportChange = () => setScheduleTooltip(null);
+
+    document.addEventListener('pointerdown', closeOnOutsideClick);
+    document.addEventListener('keydown', closeOnEscape);
+    window.addEventListener('resize', closeOnViewportChange);
+    window.addEventListener('scroll', closeOnViewportChange, true);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsideClick);
+      document.removeEventListener('keydown', closeOnEscape);
+      window.removeEventListener('resize', closeOnViewportChange);
+      window.removeEventListener('scroll', closeOnViewportChange, true);
+    };
+  }, [scheduleTooltip]);
+
+  const toggleScheduleTooltip = (
+    event: React.MouseEvent<HTMLButtonElement>,
+    id: string,
+    text: string
+  ) => {
+    if (scheduleTooltip?.id === id) {
+      setScheduleTooltip(null);
+      return;
+    }
+
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const width = Math.min(280, window.innerWidth - 24);
+    const above = bounds.bottom + 72 > window.innerHeight;
+    setScheduleTooltip({
+      id,
+      text,
+      left: Math.max(12 + width / 2, Math.min(bounds.left + bounds.width / 2, window.innerWidth - 12 - width / 2)),
+      top: above ? bounds.top - 8 : bounds.bottom + 8,
+      above,
+    });
+  };
 
   useEffect(() => {
     let isMounted = true;
@@ -832,7 +887,7 @@ function DoctorBookingDirectoryContent() {
           patientSupabase.from('departments').select('id, name'),
           patientSupabase
             .from('tickets')
-            .select('id, doctor_id, status, token_number, patient_name')
+            .select('id, doctor_id, status')
             .gte('created_at', start)
             .lt('created_at', end)
           ,
@@ -874,7 +929,6 @@ function DoctorBookingDirectoryContent() {
 
           const docTickets = todayTickets.filter(ticket => ticket.doctor_id === doc.id);
           const waitingCount = docTickets.filter(ticket => ticket.status === 'waiting').length;
-          const activeConsultation = docTickets.find(ticket => ticket.status === 'in-consultation');
           const rating = ratingMap.get(doc.id);
 
           return {
@@ -892,8 +946,6 @@ function DoctorBookingDirectoryContent() {
             department_id: doc.department_id || null,
             department_name: deptName || 'General OPD',
             waiting_count: waitingCount,
-            current_token: activeConsultation?.token_number || null,
-            current_patient_name: activeConsultation?.patient_name || null,
             opd_status: doc.opd_status || 'ACTIVE',
             broadcast_message: doc.broadcast_message || null,
             rating: rating ? rating.total / rating.count : 3,
@@ -959,7 +1011,7 @@ function DoctorBookingDirectoryContent() {
         const [ticketsResult, ratingsResult] = await Promise.all([
           patientSupabase
             .from('tickets')
-            .select('doctor_id, status, token_number, patient_name')
+            .select('doctor_id, status')
             .gte('created_at', start)
             .lt('created_at', end),
           patientSupabase
@@ -978,8 +1030,6 @@ function DoctorBookingDirectoryContent() {
         const ratingTickets = (ratingsResult.data || []) as DoctorRatingTicket[];
         const metricsByDoctor = new Map<string, {
           waitingCount: number;
-          currentToken: string | null;
-          currentPatientName: string | null;
         }>();
         const ratingByDoctor = new Map<string, { total: number; count: number }>();
 
@@ -987,15 +1037,9 @@ function DoctorBookingDirectoryContent() {
           if (!ticket.doctor_id) return;
           const metrics = metricsByDoctor.get(ticket.doctor_id) || {
             waitingCount: 0,
-            currentToken: null,
-            currentPatientName: null,
           };
 
           if (ticket.status === 'waiting') metrics.waitingCount += 1;
-          if (ticket.status === 'in-consultation') {
-            metrics.currentToken = ticket.token_number;
-            metrics.currentPatientName = ticket.patient_name;
-          }
           metricsByDoctor.set(ticket.doctor_id, metrics);
         });
 
@@ -1013,8 +1057,6 @@ function DoctorBookingDirectoryContent() {
           return {
             ...doctor,
             waiting_count: metrics?.waitingCount || 0,
-            current_token: metrics?.currentToken || null,
-            current_patient_name: metrics?.currentPatientName || null,
             rating: rating ? rating.total / rating.count : 3,
           };
         }));
@@ -2067,20 +2109,46 @@ function DoctorBookingDirectoryContent() {
                         <span className="text-[11px] font-bold text-slate-600">{doc.rating.toFixed(1)}/5</span>
                       </div>
 
-                      <div className="mt-3 flex min-h-16 items-start gap-2 rounded-2xl border border-blue-100 bg-gradient-to-br from-blue-50/80 to-slate-50 p-2.5 text-[11px] font-semibold text-slate-400">
-                        <Clock className="mt-1 h-3.5 w-3.5 shrink-0 text-blue-600" />
-                        <div className="grid min-w-0 flex-1 gap-1.5">
-                          {doc.opd_sessions.length > 0
-                            ? doc.opd_sessions.map((session) => (
-                                <span
-                                  key={session.shift}
-                                  className="flex min-h-7 items-center rounded-md px-2 py-1 leading-4 text-slate-600"
-                                >
-                                  {formatOpdSessions([session])}
+                      <div
+                        className="mt-3 flex min-w-0 items-center gap-2"
+                        title={doc.opd_sessions.length > 0 ? formatOpdSessions(doc.opd_sessions) : `${doc.opd_timing} (${doc.opd_shift})`}
+                      >
+                        {doc.opd_sessions.length > 0
+                          ? doc.opd_sessions.map((session, index) => {
+                            return (
+                              <button
+                                type="button"
+                                data-schedule-tooltip-trigger
+                                key={`${session.shift}-${session.start_time}-${session.end_time}-${index}`}
+                                className="flex min-h-10 min-w-0 flex-1 items-center gap-1 overflow-hidden rounded-2xl border border-blue-100 bg-gradient-to-br from-blue-50/80 to-slate-50 px-2 py-2 text-left text-[10px] font-semibold text-slate-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+                                title={formatOpdSessions([session])}
+                                aria-label={`${formatCompactOpdSessions([session])}. Tap to see full schedule.`}
+                                aria-describedby={scheduleTooltip?.id === `schedule-tooltip-${doc.id}-${index}` ? scheduleTooltip.id : undefined}
+                                onClick={(event) => toggleScheduleTooltip(event, `schedule-tooltip-${doc.id}-${index}`, formatOpdSessions([session]))}
+                              >
+                                <Clock className="h-3 w-3 shrink-0 text-blue-600" />
+                                <span className="min-w-0 truncate whitespace-nowrap leading-4">
+                                  {formatCompactOpdSessions([session])}
                                 </span>
-                              ))
-                            : <span className="flex min-h-7 items-center rounded-md px-2 py-1 leading-4 text-slate-600">{doc.opd_timing} ({doc.opd_shift})</span>}
-                        </div>
+                              </button>
+                            );
+                          })
+                          : (
+                            <button
+                              type="button"
+                              data-schedule-tooltip-trigger
+                              className="flex min-h-10 min-w-0 flex-1 items-center gap-2 overflow-hidden rounded-2xl border border-blue-100 bg-gradient-to-br from-blue-50/80 to-slate-50 px-3 py-2 text-left text-[11px] font-semibold text-slate-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+                              title={`${doc.opd_timing} (${doc.opd_shift})`}
+                              aria-label={`${doc.opd_timing} (${doc.opd_shift}). Tap to see full schedule.`}
+                              aria-describedby={scheduleTooltip?.id === `schedule-tooltip-${doc.id}-legacy` ? scheduleTooltip.id : undefined}
+                              onClick={(event) => toggleScheduleTooltip(event, `schedule-tooltip-${doc.id}-legacy`, `${doc.opd_timing} (${doc.opd_shift})`)}
+                            >
+                              <Clock className="h-3.5 w-3.5 shrink-0 text-blue-600" />
+                              <span className="min-w-0 truncate whitespace-nowrap leading-4">
+                                {`${doc.opd_timing} (${doc.opd_shift})`}
+                              </span>
+                            </button>
+                          )}
                       </div>
 
                       {getDoctorClosureReason(doc) && (
@@ -2096,25 +2164,8 @@ function DoctorBookingDirectoryContent() {
                         </div>
                       )}
 
-                      {/* Live Queue Broadcast */}
-                      {doc.current_token ? (
-                        <div className="mt-3.5 rounded-2xl border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs">
-                          <div className="flex items-center gap-1.5 font-bold text-blue-700">
-                            <Users className="h-3.5 w-3.5" />
-                            <span>Now consulting</span>
-                          </div>
-                          <div className="mt-1 flex items-center justify-between gap-2">
-                            <span className="truncate font-semibold text-slate-700">
-                              {doc.current_patient_name || 'Current patient'}
-                            </span>
-                            <span className="shrink-0 rounded-md bg-white px-2 py-1 font-mono font-black text-blue-700 shadow-sm">
-                              {doc.current_token}
-                            </span>
-                          </div>
-                        </div>
-                      ) : null}
                       {(doc.waiting_count ?? 0) > 0 ? (
-                        <div className="mt-2 flex items-center justify-between rounded-2xl border border-slate-100 bg-slate-50 px-3 py-2 text-xs">
+                        <div className="mt-2 flex items-center justify-between rounded-2xl border border-blue-100 bg-gradient-to-br from-blue-50/80 to-slate-50 px-3 py-2 text-xs">
                           <span className="flex items-center gap-1.5 font-medium text-slate-500">
                             <Users className="h-3.5 w-3.5 text-blue-600" />
                             <span>Waiting in line</span>
@@ -2531,6 +2582,23 @@ function DoctorBookingDirectoryContent() {
             </form>
           </div>
         </div>
+      )}
+
+      {scheduleTooltip && typeof document !== 'undefined' && createPortal(
+        <div
+          id={scheduleTooltip.id}
+          data-schedule-tooltip
+          role="tooltip"
+          className="fixed z-[100] max-w-[calc(100vw-24px)] rounded-xl border border-blue-100 bg-white px-3 py-2 text-xs font-semibold text-slate-700 shadow-xl"
+          style={{
+            left: scheduleTooltip.left,
+            top: scheduleTooltip.top,
+            transform: scheduleTooltip.above ? 'translate(-50%, -100%)' : 'translateX(-50%)',
+          }}
+        >
+          {scheduleTooltip.text}
+        </div>,
+        document.body
       )}
 
     </div>
