@@ -8,6 +8,7 @@ A modern Next.js and Supabase application designed to solve Doctor's OPD (Outpat
 - **Live Public Queue Display**: Real-time TV / display screen for waiting areas.
 - **Patient Ticket Tracker**: Mobile web view for patients to track their estimated waiting time.
 - **Patient Call Alerts**: Reception chime when a token is called, with optional silent push notifications to the patient's device.
+- **Clinic Booking QR**: Reception can generate and download one QR code that opens the clinic's doctor directory for online token booking.
 
 ## Patient Call Alerts Setup
 

@@ -632,10 +632,12 @@ function DoctorBookingDirectoryContent() {
   const [nowServingToken, setNowServingToken] = useState<string | null>(null);
   const [patientsAhead, setPatientsAhead] = useState<number>(0);
 
-  // Phone search state for "Track My Turn" tab
-  const [trackerPhone, setTrackerPhone] = useState('');
+  // Tickets linked to the signed-in patient account for today's tracker.
+  const [trackerTickets, setTrackerTickets] = useState<ConfirmedTicket[]>([]);
+  const [patientsAheadByTicketId, setPatientsAheadByTicketId] = useState<Record<string, number>>({});
   const [trackerLoading, setTrackerLoading] = useState(false);
   const [trackerError, setTrackerError] = useState('');
+  const trackerRequestRef = useRef(0);
   const [patientRating, setPatientRating] = useState(0);
   const [ratingSaving, setRatingSaving] = useState(false);
   const [ratingMessage, setRatingMessage] = useState('');
@@ -1359,21 +1361,17 @@ function DoctorBookingDirectoryContent() {
     }
   };
 
-  // 5. Track My Token by Phone Number
-  const handleTrackByPhone = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const loadPatientTrackerTickets = useCallback(async (showLoading = false) => {
+    const requestId = trackerRequestRef.current + 1;
+    trackerRequestRef.current = requestId;
+    if (showLoading) setTrackerLoading(true);
     setTrackerError('');
-    setTrackerLoading(true);
-
     try {
-      const cleanPhone = trackerPhone.trim().replace(/\D/g, '');
-      if (cleanPhone.length < 10) {
-        throw new Error('Please enter a valid 10-digit mobile number.');
-      }
+      if (!currentUser) throw new Error('Sign in to track your bookings.');
 
       const { start, end } = getClinicDayRange();
 
-      const { data: ticket, error: ticketErr } = await patientSupabase
+      const { data: tickets, error: ticketErr } = await patientSupabase
         .from('tickets')
         .select(`
           id,
@@ -1391,42 +1389,92 @@ function DoctorBookingDirectoryContent() {
             clinic_name
           )
         `)
-        .eq('phone_number', cleanPhone)
+        .eq('patient_user_id', currentUser.id)
         .gte('created_at', start)
         .lt('created_at', end)
         .in('status', ['waiting', 'in-consultation', 'completed', 'skipped', 'expired'])
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
+        .order('created_at', { ascending: false });
 
       if (ticketErr) throw ticketErr;
-      if (!ticket) {
-        throw new Error('No active token found for this mobile number today.');
+      const patientTickets = tickets || [];
+      const doctorIds = [...new Set(patientTickets
+        .map((ticket) => ticket.doctor_id)
+        .filter((doctorId): doctorId is string => Boolean(doctorId)))];
+      let waitingQueue: { doctor_id: string | null; created_at: string }[] = [];
+
+      if (doctorIds.length > 0) {
+        const { data: queue, error: queueError } = await patientSupabase
+          .from('tickets')
+          .select('doctor_id, created_at')
+          .in('doctor_id', doctorIds)
+          .eq('status', 'waiting')
+          .gte('created_at', start)
+          .lt('created_at', end);
+
+        if (queueError) throw queueError;
+        waitingQueue = queue || [];
       }
 
-      const docInfo = ticket.doctors as TrackedDoctorDetails | null;
+      if (trackerRequestRef.current !== requestId) return;
 
-      setConfirmedTicket({
-        id: ticket.id,
-        patient_user_id: ticket.patient_user_id,
-        token_number: ticket.token_number,
-        patient_name: ticket.patient_name,
-        phone: ticket.phone_number,
-        doctor_name: docInfo?.name || 'Doctor',
-        clinic_name: docInfo?.clinic_name || 'Care Clinic',
-        room_number: docInfo?.room_number || 'Room 1',
-        booking_amount: 0,
-        status: ticket.status,
-        created_at: ticket.created_at,
-        doctor_id: ticket.doctor_id,
-        rating: ticket.rating,
-      });
-
+      const nextPatientsAhead = Object.fromEntries(patientTickets.map((ticket) => [
+        ticket.id,
+        ticket.status === 'waiting' && ticket.doctor_id
+          ? waitingQueue.filter((queuedTicket) =>
+              queuedTicket.doctor_id === ticket.doctor_id
+              && queuedTicket.created_at < ticket.created_at
+            ).length
+          : 0,
+      ]));
+      setPatientsAheadByTicketId(nextPatientsAhead);
+      setTrackerTickets(patientTickets.map((ticket) => {
+        const docInfo = ticket.doctors as TrackedDoctorDetails | null;
+        return {
+          id: ticket.id,
+          patient_user_id: ticket.patient_user_id,
+          token_number: ticket.token_number,
+          patient_name: ticket.patient_name,
+          phone: ticket.phone_number || '',
+          doctor_name: docInfo?.name || 'Doctor',
+          clinic_name: docInfo?.clinic_name || 'Care Clinic',
+          room_number: docInfo?.room_number || 'Room 1',
+          booking_amount: 0,
+          status: ticket.status,
+          created_at: ticket.created_at,
+          doctor_id: ticket.doctor_id,
+          rating: ticket.rating,
+        };
+      }));
     } catch (err: unknown) {
-      setTrackerError(getErrorMessage(err, 'Unable to track token.'));
+      if (trackerRequestRef.current !== requestId) return;
+      console.error('Patient token lookup failed:', err);
+      setTrackerError(getErrorMessage(err, 'Unable to load your tokens.'));
     } finally {
-      setTrackerLoading(false);
+      if (trackerRequestRef.current === requestId) setTrackerLoading(false);
     }
+  }, [currentUser]);
+
+  useEffect(() => {
+    if (activeTab !== 'TRACKER' || !currentUser) return;
+
+    const channel = patientSupabase
+      .channel(`patient-tracker-${currentUser.id}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, () => {
+        void loadPatientTrackerTickets();
+      })
+      .subscribe();
+
+    return () => {
+      trackerRequestRef.current += 1;
+      void patientSupabase.removeChannel(channel);
+    };
+  }, [activeTab, currentUser, loadPatientTrackerTickets]);
+
+  const handleOpenPatientTracker = () => {
+    setConfirmedTicket(null);
+    setShowProfileMenu(false);
+    setActiveTab('TRACKER');
+    void loadPatientTrackerTickets(true);
   };
 
   const handlePatientRating = async (rating: number) => {
@@ -1504,7 +1552,7 @@ function DoctorBookingDirectoryContent() {
       )}
 
       {/* Header Banner */}
-      <header className="bg-slate-950 text-white border-b border-slate-800">
+      <header className="sticky top-0 z-30 bg-slate-950 text-white border-b border-slate-800">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 py-5 sm:py-8">
           <div className="flex flex-col gap-4 sm:gap-5">
             <div className="flex w-full flex-wrap items-center justify-between gap-3 sm:flex-nowrap sm:gap-4">
@@ -1525,7 +1573,7 @@ function DoctorBookingDirectoryContent() {
                   setActiveTab('DIRECTORY');
                   setConfirmedTicket(null);
                 }}
-                className="whitespace-nowrap rounded-xl bg-blue-600 px-3 py-2 text-xs font-bold text-white shadow-lg shadow-blue-900/20 transition-all hover:bg-blue-500 hover:shadow-blue-900/30 cursor-pointer sm:px-4 sm:py-2.5"
+                className="min-h-10 whitespace-nowrap rounded-xl bg-blue-600 px-3 py-2 text-xs font-bold text-white shadow-lg shadow-blue-900/20 transition-all hover:bg-blue-500 hover:shadow-blue-900/30 cursor-pointer sm:min-h-11 sm:px-4 sm:py-2.5"
               >
                 Book New Token
               </button>
@@ -1536,12 +1584,12 @@ function DoctorBookingDirectoryContent() {
                     type="button"
                     aria-expanded={showProfileMenu}
                     onClick={() => setShowProfileMenu((open) => !open)}
-                    className="group flex min-w-0 max-w-40 items-center gap-1.5 rounded-2xl border border-slate-700 bg-slate-900 px-2 py-1.5 text-left shadow-lg shadow-black/10 transition-all hover:border-blue-400 hover:bg-slate-800 cursor-pointer sm:max-w-56 sm:gap-2 sm:px-2.5 sm:py-2"
+                    className="group flex min-h-10 min-w-0 max-w-56 items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-900 px-2 py-2 text-left shadow-lg shadow-black/10 transition-all hover:border-blue-400 hover:bg-slate-800 cursor-pointer sm:min-h-11 sm:gap-2 sm:px-2.5 sm:py-2.5"
                   >
-                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-blue-400 to-indigo-500 text-[10px] font-black text-white shadow-inner sm:h-8 sm:w-8 sm:rounded-xl sm:text-xs">
+                    <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-blue-400 to-indigo-500 text-[8px] font-black text-white shadow-inner sm:h-4 sm:w-4 sm:text-[9px]">
                       {(String(currentUser.user_metadata?.full_name || currentUser.email || 'P').trim().charAt(0) || 'P').toUpperCase()}
                     </span>
-                    <span className="min-w-0 max-w-28 truncate text-[10px] font-bold text-white sm:text-xs">
+                    <span className="min-w-0 max-w-32 truncate text-[10px] font-bold text-white sm:text-xs">
                       {String(currentUser.user_metadata?.full_name || currentUser.email || 'Patient')}
                     </span>
                     <ChevronDown className={`h-3 w-3 shrink-0 text-slate-400 transition-transform group-hover:text-white sm:h-3.5 sm:w-3.5 ${showProfileMenu ? 'rotate-180' : ''}`} />
@@ -1564,11 +1612,7 @@ function DoctorBookingDirectoryContent() {
                       <div className="space-y-1 p-2">
                       <button
                         type="button"
-                        onClick={() => {
-                          setActiveTab('TRACKER');
-                          setConfirmedTicket(null);
-                          setShowProfileMenu(false);
-                        }}
+                        onClick={() => void handleOpenPatientTracker()}
                         className="flex w-full items-center gap-3 rounded-2xl px-3 py-3 text-left text-xs font-bold text-slate-600 transition-colors hover:bg-blue-50 hover:text-blue-700 cursor-pointer"
                       >
                         <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-blue-50 text-blue-600">
@@ -1661,7 +1705,7 @@ function DoctorBookingDirectoryContent() {
 
           {/* Search Box */}
           {activeTab === 'DIRECTORY' && (
-          <div className="relative w-full max-w-2xl">
+          <div className="relative mt-8 w-full max-w-2xl">
               <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-slate-400">
                 <Search className="w-5 h-5" />
               </div>
@@ -1956,58 +2000,102 @@ function DoctorBookingDirectoryContent() {
 
         {/* VIEW 2: TRACK MY TOKEN TAB */}
         {activeTab === 'TRACKER' && currentUser && !confirmedTicket && (
-          <div className="max-w-md mx-auto bg-white rounded-3xl p-6 sm:p-8 shadow-xl border border-slate-200">
-            <div className="text-center mb-6">
-              <div className="w-12 h-12 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center mx-auto mb-3">
-                <Compass className="w-6 h-6" />
+          <div className="mx-auto max-w-2xl">
+            <div className="mb-5 flex items-center gap-3">
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-blue-50 text-blue-600">
+                <Compass className="h-6 w-6" />
               </div>
-              <h2 className="text-lg font-black text-slate-900">Track Today&apos;s Token</h2>
-              <p className="text-xs text-slate-500 mt-1">
-                Enter the mobile number you used while booking to check your live queue status.
-              </p>
+              <div>
+                <h2 className="text-lg font-black text-slate-900">Track My Turn</h2>
+                <p className="mt-1 text-xs text-slate-500">Choose one of your bookings to view its live queue status.</p>
+              </div>
             </div>
 
-            <p className="mb-4 rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-center text-xs font-medium leading-relaxed text-blue-800">
-              Doctor consultation fees, if applicable, are payable directly at the clinic/hospital.
-            </p>
-
             {trackerError && (
-              <div className="mb-4 p-3 rounded-2xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-semibold flex items-start gap-2">
-                <AlertCircle className="w-4 h-4 shrink-0 text-rose-500 mt-0.5" />
+              <div role="alert" className="mb-4 flex items-start gap-2 rounded-2xl border border-rose-200 bg-rose-50 p-3 text-xs font-semibold text-rose-700">
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-500" />
                 <span className="flex-1">{trackerError}</span>
               </div>
             )}
 
-            <form onSubmit={handleTrackByPhone} className="space-y-4">
-              <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                  Your 10-Digit Mobile Number
-                </label>
-                <div className="relative">
-                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
-                    <Phone className="w-4 h-4" />
-                  </div>
-                  <input
-                    type="tel"
-                    required
-                    maxLength={10}
-                    value={trackerPhone}
-                    onChange={(e) => setTrackerPhone(e.target.value)}
-                    placeholder="e.g. 9876543210"
-                    className="w-full bg-slate-50 border border-slate-300 rounded-xl pl-10 pr-4 py-3 text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-600 focus:outline-hidden"
-                  />
-                </div>
+            {trackerLoading ? (
+              <div className="rounded-3xl border border-slate-200 bg-white px-6 py-12 text-center shadow-sm">
+                <div className="mx-auto mb-3 h-8 w-8 animate-spin rounded-full border-4 border-blue-600 border-t-transparent" />
+                <p className="text-sm font-bold text-slate-700">Loading your bookings...</p>
               </div>
+            ) : trackerTickets.length > 0 ? (
+              <div className="space-y-3">
+                {trackerTickets.map((ticket) => {
+                  const isYourTurn = ticket.status === 'waiting'
+                    && patientsAheadByTicketId[ticket.id] === 0;
+                  const statusLabel = isYourTurn
+                    ? 'Your turn'
+                    : ticket.status === 'in-consultation'
+                      ? 'In consultation'
+                      : ticket.status.charAt(0).toUpperCase() + ticket.status.slice(1);
+                  const statusColor = isYourTurn
+                    ? 'bg-emerald-50 text-emerald-700'
+                    : ticket.status === 'waiting'
+                    ? 'bg-amber-50 text-amber-700'
+                    : ticket.status === 'in-consultation'
+                      ? 'bg-emerald-50 text-emerald-700'
+                      : ticket.status === 'completed'
+                        ? 'bg-blue-50 text-blue-700'
+                        : 'bg-slate-100 text-slate-600';
 
-              <button
-                type="submit"
-                disabled={trackerLoading}
-                className="w-full py-3.5 rounded-xl shadow-md text-xs font-black text-white bg-blue-600 hover:bg-blue-700 active:scale-95 disabled:opacity-50 transition-all cursor-pointer flex items-center justify-center gap-2"
-              >
-                <span>{trackerLoading ? 'Checking Queue...' : 'Find My Token'}</span>
-                <ArrowRight className="w-4 h-4" />
-              </button>
-            </form>
+                  return (
+                    <article key={ticket.id} className="grid grid-cols-[3.25rem_minmax(0,1fr)] items-center gap-x-3 gap-y-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm transition hover:border-blue-200 hover:shadow-md sm:grid-cols-[3.25rem_minmax(0,1fr)_auto] sm:gap-x-4 sm:p-5">
+                      <div className="flex h-14 w-[3.25rem] shrink-0 flex-col items-center justify-center rounded-xl bg-slate-950 text-white">
+                        <span className="text-[9px] font-bold uppercase tracking-wide text-slate-400">Token</span>
+                        <span className="text-sm font-black leading-5">{ticket.token_number}</span>
+                      </div>
+                      <div className="min-w-0 space-y-1">
+                        <div className="flex min-w-0 items-center justify-between gap-2">
+                          <h3 className="min-w-0 truncate text-sm font-extrabold leading-5 text-slate-900">{ticket.doctor_name}</h3>
+                          <span className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-bold leading-none ${statusColor}`}>{statusLabel}</span>
+                        </div>
+                        <p className="truncate text-xs font-semibold leading-5 text-slate-700">
+                          <span className="text-slate-400">Patient</span> · {ticket.patient_name}
+                        </p>
+                        <p className="truncate text-xs leading-5 text-slate-500">{ticket.clinic_name} · {ticket.room_number}</p>
+                        <p className="text-[11px] leading-4 text-slate-400">
+                          Booked {ticket.created_at ? new Date(ticket.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'today'}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setConfirmedTicket(ticket);
+                          setRatingMessage('');
+                        }}
+                        className="col-span-2 inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-xs font-bold text-white shadow-sm transition hover:bg-blue-700 sm:col-span-1 sm:w-auto"
+                      >
+                        Track this turn
+                        <ArrowRight className="h-4 w-4" />
+                      </button>
+                    </article>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="rounded-3xl border border-slate-200 bg-white px-6 py-10 text-center shadow-sm">
+                <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-100 text-slate-500">
+                  <Ticket className="h-6 w-6" />
+                </div>
+                <h3 className="text-sm font-extrabold text-slate-900">No bookings for today</h3>
+                <p className="mx-auto mt-1 max-w-sm text-xs leading-5 text-slate-500">
+                  Bookings made while signed in will appear here. You can track each booking separately.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('DIRECTORY')}
+                  className="mt-5 inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-xs font-bold text-white transition hover:bg-blue-700"
+                >
+                  Browse doctors
+                  <ArrowRight className="h-4 w-4" />
+                </button>
+              </div>
+            )}
           </div>
         )}
 
