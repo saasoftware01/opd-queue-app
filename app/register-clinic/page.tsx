@@ -5,12 +5,16 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase/client';
 import { getErrorMessage } from '@/lib/error-message';
+import IndianCityField from '@/app/components/IndianCityField';
+import { getCanonicalIndianCity } from '@/lib/indian-cities';
 import { Building2, Stethoscope, ArrowLeft, CheckCircle2, AlertCircle, ArrowRight } from 'lucide-react';
 
 export default function RegisterClinicPage() {
   const router = useRouter();
 
   const [clinicName, setClinicName] = useState('');
+  const [clinicCity, setClinicCity] = useState('');
+  const [clinicAddress, setClinicAddress] = useState('');
   const [doctorName, setDoctorName] = useState('');
   const [roomNumber, setRoomNumber] = useState('Room 1');
   const [orgType, setOrgType] = useState<'SOLO_CLINIC' | 'HOSPITAL'>('SOLO_CLINIC');
@@ -28,9 +32,15 @@ export default function RegisterClinicPage() {
 
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
+    const city = getCanonicalIndianCity(clinicCity);
+    if (!city) {
+      setErrorMsg('Select a city from the Indian city suggestions.');
+      return;
+    }
     setLoading(true);
     setErrorMsg('');
     setSuccessMsg('');
+    setClinicCity(city);
 
     try {
       // 1. Attempt Sign Up
@@ -70,6 +80,8 @@ export default function RegisterClinicPage() {
             name: clinicName.trim(),
             type: orgType,
             phone: phone.trim() || null,
+            city,
+            address: clinicAddress.trim(),
           },
         ])
         .select()
@@ -272,6 +284,35 @@ export default function RegisterClinicPage() {
                   placeholder={orgType === 'HOSPITAL' ? 'e.g. City Life Multispeciality Hospital' : 'e.g. City Dental & Health Clinic'}
                   className="mt-1 w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:ring-2 focus:ring-blue-500 focus:outline-hidden"
                 />
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase">
+                    City *
+                  </label>
+                  <IndianCityField
+                    id="registration-city"
+                    value={clinicCity}
+                    onChange={setClinicCity}
+                    className="mt-1 w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:ring-2 focus:ring-blue-500 focus:outline-hidden"
+                  />
+                  <p className="mt-1 text-[11px] text-slate-500">Choose a city from the suggestions.</p>
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase">
+                    Clinic / Hospital Address *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    autoComplete="street-address"
+                    value={clinicAddress}
+                    onChange={(e) => setClinicAddress(e.target.value)}
+                    placeholder="Street, area, building"
+                    className="mt-1 w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:ring-2 focus:ring-blue-500 focus:outline-hidden"
+                  />
+                </div>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">

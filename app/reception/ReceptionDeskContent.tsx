@@ -32,7 +32,8 @@ import {
   Search,
   ChevronDown,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  MapPin,
 } from 'lucide-react';
 import { Department, Doctor } from '@/lib/types';
 import { getClinicDateRange, getClinicDateString, getClinicDayRange } from '@/lib/clinic-day';
@@ -47,6 +48,8 @@ import {
 } from '@/lib/opd-schedule';
 import { getErrorMessage } from '@/lib/error-message';
 import { readPushNotificationResponse } from '@/lib/push-notification-response';
+import IndianCityField from '@/app/components/IndianCityField';
+import { getCanonicalIndianCity } from '@/lib/indian-cities';
 
 interface ExtendedDoctor extends Doctor {
   clinic_id?: string | null;
@@ -59,6 +62,13 @@ interface ExtendedDoctor extends Doctor {
   opd_holiday_dates?: string[] | null;
   broadcast_message?: string | null;
   opd_status?: 'LIVE' | 'PAUSED';
+}
+
+interface ClinicLocation {
+  id: string;
+  name: string;
+  city: string | null;
+  address: string | null;
 }
 
 interface QueueTicket {
@@ -104,10 +114,15 @@ export default function ReceptionDeskPage() {
 
   const [departments, setDepartments] = useState<Department[]>([]);
   const [doctors, setDoctors] = useState<ExtendedDoctor[]>([]);
+  const [clinics, setClinics] = useState<ClinicLocation[]>([]);
   const [selectedDoctorId, setSelectedDoctorId] = useState<string>('');
   const currentDoctor = useMemo(
     () => doctors.find((doctor) => doctor.id === selectedDoctorId) || null,
     [doctors, selectedDoctorId]
+  );
+  const currentClinic = useMemo(
+    () => clinics.find((clinic) => clinic.id === currentDoctor?.clinic_id) || null,
+    [clinics, currentDoctor]
   );
 
   const [queueTickets, setQueueTickets] = useState<QueueTicket[]>([]);
@@ -139,6 +154,8 @@ export default function ReceptionDeskPage() {
   const [showLogoutModal, setShowLogoutModal] = useState<boolean>(false);
   const [showDoctorProfile, setShowDoctorProfile] = useState(false);
   const [showDoctorEdit, setShowDoctorEdit] = useState(false);
+  const [clinicCity, setClinicCity] = useState('');
+  const [clinicAddress, setClinicAddress] = useState('');
   const [doctorEditName, setDoctorEditName] = useState('');
   const [doctorEditRoom, setDoctorEditRoom] = useState('');
   const [doctorEditFee, setDoctorEditFee] = useState('');
@@ -301,7 +318,7 @@ export default function ReceptionDeskPage() {
 
         const { data: clinics, error: clinicsError } = await supabase
           .from('clinics')
-          .select('id')
+          .select('id, name, city, address')
           .eq('owner_id', session.user.id);
 
         if (clinicsError) throw clinicsError;
@@ -319,6 +336,7 @@ export default function ReceptionDeskPage() {
         if (deptRes.error) throw deptRes.error;
 
         const docs = (docRes.data || []) as ExtendedDoctor[];
+        setClinics((clinics || []) as ClinicLocation[]);
         setDoctors(docs);
         setDepartments(deptRes.data || []);
 
@@ -912,6 +930,8 @@ export default function ReceptionDeskPage() {
     setDoctorEditName(currentDoctor.name || '');
     setDoctorEditRoom(currentDoctor.room_number || '');
     setDoctorEditFee(String(currentDoctor.consultation_fee ?? 500));
+    setClinicCity(currentClinic?.city || '');
+    setClinicAddress(currentClinic?.address || '');
     setDoctorEditError('');
     setNewOpdSessions(getOpdSessions(currentDoctor.opd_sessions, currentDoctor.opd_shift, currentDoctor.opd_timing));
     setNewWeeklyOffDays(currentDoctor.weekly_off_days || []);
@@ -934,6 +954,16 @@ export default function ReceptionDeskPage() {
     }
     if (!roomNumber) {
       setDoctorEditError('Room number is required.');
+      return;
+    }
+    const city = currentClinic ? getCanonicalIndianCity(clinicCity) : null;
+    const address = clinicAddress.trim();
+    if (currentClinic && !city) {
+      setDoctorEditError('Select a clinic city from the Indian city suggestions.');
+      return;
+    }
+    if (currentClinic && !address) {
+      setDoctorEditError('Clinic street address is required.');
       return;
     }
     if (!Number.isFinite(fee) || fee < 0) {
@@ -990,8 +1020,28 @@ export default function ReceptionDeskPage() {
             }
           : doctor
       ));
+
+      if (currentClinic && city) {
+        try {
+          const { error: clinicError } = await supabase
+            .from('clinics')
+            .update({ city, address })
+            .eq('id', currentClinic.id);
+          if (clinicError) throw clinicError;
+        } catch (clinicError: unknown) {
+          setDoctorEditError(
+            `Doctor profile was saved, but the clinic address could not be updated: ${getErrorMessage(clinicError, 'Unknown error')}`
+          );
+          return;
+        }
+
+        setClinics((previousClinics) => previousClinics.map((clinic) =>
+          clinic.id === currentClinic.id ? { ...clinic, city, address } : clinic
+        ));
+      }
+
       setShowDoctorEdit(false);
-      setSuccessMsg('Doctor profile and OPD schedule updated successfully.');
+      setSuccessMsg('Doctor profile, clinic address, and OPD schedule updated successfully.');
     } catch (error: unknown) {
       setDoctorEditError(getErrorMessage(error, 'Failed to update doctor profile.'));
     } finally {
@@ -2469,6 +2519,37 @@ export default function ReceptionDeskPage() {
                   </label>
                 </div>
               </section>
+
+              {currentClinic && (
+                <section className="rounded-2xl border border-slate-200 p-4 sm:p-5">
+                  <div className="mb-4 flex items-center gap-3">
+                    <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-rose-50 text-rose-600"><MapPin className="h-4 w-4" /></span>
+                    <div>
+                      <h4 className="text-sm font-extrabold text-slate-900">Clinic address</h4>
+                      <p className="text-xs text-slate-500">Patients use the city to find doctors nearby.</p>
+                    </div>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="block text-xs font-bold text-slate-700">City
+                      <IndianCityField
+                        id="doctor-profile-clinic-city"
+                        value={clinicCity}
+                        onChange={setClinicCity}
+                        className="mt-1.5 w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-3 text-sm text-slate-900 outline-none transition focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-100"
+                      />
+                    </label>
+                    <label className="block text-xs font-bold text-slate-700">Street address
+                      <input
+                        required
+                        autoComplete="street-address"
+                        value={clinicAddress}
+                        onChange={(event) => setClinicAddress(event.target.value)}
+                        className="mt-1.5 w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-3 text-sm text-slate-900 outline-none transition focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-100"
+                      />
+                    </label>
+                  </div>
+                </section>
+              )}
 
               <section className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4 sm:p-5">
                 <div className="mb-4 flex flex-wrap items-center justify-between gap-3">

@@ -5,6 +5,8 @@ import { createPortal } from 'react-dom';
 import { useSearchParams } from 'next/navigation';
 import type { User as SupabaseUser } from '@supabase/supabase-js';
 import { patientSupabase } from '@/lib/supabase/patient-client';
+import IndianCityField from '@/app/components/IndianCityField';
+import { matchesIndianCity } from '@/lib/indian-cities';
 import { formatCompactOpdSessions, formatOpdSessions, getOpdSessions, OpdSession } from '@/lib/opd-schedule';
 import { getClinicDateString, getClinicDateTimeParts, getClinicDayRange } from '@/lib/clinic-day';
 import { 
@@ -30,13 +32,16 @@ import {
   LogOut,
   ChevronDown,
   History as HistoryIcon,
-  UserRound
+  UserRound,
+  MapPin,
 } from 'lucide-react';
 
 interface ClinicDirectoryRecord {
   id: string;
   name: string;
   booking_fee: number | string | null;
+  city: string | null;
+  address: string | null;
 }
 
 interface DepartmentDirectoryRecord {
@@ -94,6 +99,8 @@ interface DoctorDirectoryItem {
   opd_holiday_dates: string[];
   clinic_id: string;
   clinic_name: string;
+  clinic_city: string;
+  clinic_address: string;
   booking_fee: number;
   department_id: string | null;
   department_name: string;
@@ -213,6 +220,7 @@ function DoctorBookingDirectoryContent() {
   const [scheduleUpdateToast, setScheduleUpdateToast] = useState('');
   const scheduleSnapshotRef = useRef<Map<string, string> | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [selectedCity, setSelectedCity] = useState('');
   const [currentTime, setCurrentTime] = useState(() => new Date());
   const [scheduleTooltip, setScheduleTooltip] = useState<{
     id: string;
@@ -885,7 +893,7 @@ function DoctorBookingDirectoryContent() {
         // Safe parallel queries using allSettled so one table never breaks the others
         const [docRes, clinicsRes, deptsRes, ticketsRes, ratingsRes] = await Promise.allSettled([
           patientSupabase.from('doctors').select('*').order('created_at', { ascending: false }),
-          patientSupabase.from('clinics').select('id, name, booking_fee'),
+          patientSupabase.from('clinics').select('id, name, booking_fee, city, address'),
           patientSupabase.from('departments').select('id, name'),
           patientSupabase
             .from('tickets')
@@ -944,6 +952,8 @@ function DoctorBookingDirectoryContent() {
             opd_holiday_dates: doc.opd_holiday_dates || [],
             clinic_id: doc.clinic_id || clinic?.id || '',
             clinic_name: clinic?.name || doc.clinic_name || 'Care Clinic',
+            clinic_city: clinic?.city?.trim() || '',
+            clinic_address: clinic?.address?.trim() || '',
             booking_fee: Number(clinic?.booking_fee) || 0,
             department_id: doc.department_id || null,
             department_name: deptName || 'General OPD',
@@ -1247,6 +1257,9 @@ function DoctorBookingDirectoryContent() {
     if (urlClinicId) {
       list = list.filter(d => d.clinic_id === urlClinicId);
     }
+    if (selectedCity) {
+      list = list.filter((doctor) => matchesIndianCity(doctor.clinic_city, selectedCity));
+    }
     const q = searchQuery.toLowerCase().trim();
     if (!q) return list;
 
@@ -1254,9 +1267,11 @@ function DoctorBookingDirectoryContent() {
       (d) =>
         d.name.toLowerCase().includes(q) ||
         d.clinic_name.toLowerCase().includes(q) ||
-        d.department_name.toLowerCase().includes(q)
+        d.department_name.toLowerCase().includes(q) ||
+        d.clinic_city.toLowerCase().includes(q) ||
+        d.clinic_address.toLowerCase().includes(q)
     );
-  }, [doctors, searchQuery, urlClinicId]);
+  }, [doctors, searchQuery, selectedCity, urlClinicId]);
 
   // 4. Quick Booking Submission
   const handleBooking = async (e: React.FormEvent) => {
@@ -1705,7 +1720,29 @@ function DoctorBookingDirectoryContent() {
 
           {/* Search Box */}
           {activeTab === 'DIRECTORY' && (
-          <div className="relative mt-8 w-full max-w-2xl">
+          <div className="mt-8 grid w-full max-w-3xl grid-cols-1 gap-3 sm:grid-cols-[minmax(14rem,1fr)_minmax(0,2fr)]">
+            <div className="relative min-w-0">
+              <label className="sr-only" htmlFor="doctor-directory-city">Filter doctors by city</label>
+              <IndianCityField
+                id="doctor-directory-city"
+                required={false}
+                value={selectedCity}
+                onChange={setSelectedCity}
+                placeholder="Filter by city or town"
+                className="w-full rounded-2xl border border-slate-700/80 bg-slate-900/90 px-4 py-3.5 pr-14 text-sm font-semibold text-white placeholder-slate-400 focus:outline-hidden focus:ring-2 focus:ring-blue-500"
+              />
+              {selectedCity && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedCity('')}
+                  aria-label="Clear city filter"
+                  className="absolute inset-y-0 right-3 text-xs font-bold text-slate-300 hover:text-white"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            <div className="relative min-w-0">
               <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-slate-400">
                 <Search className="w-5 h-5" />
               </div>
@@ -1713,10 +1750,11 @@ function DoctorBookingDirectoryContent() {
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search by doctor name, clinic, or specialty..."
-                className="w-full bg-slate-900/90 border border-slate-700/80 rounded-2xl pl-12 pr-4 py-3.5 text-sm text-white placeholder-slate-400 focus:outline-hidden focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all shadow-inner"
+                placeholder="Search doctor, clinic, city, or address..."
+                className="w-full min-w-0 rounded-2xl border border-slate-700/80 bg-slate-900/90 py-3.5 pl-12 pr-4 text-sm text-white placeholder-slate-400 shadow-inner transition-all focus:border-transparent focus:outline-hidden focus:ring-2 focus:ring-blue-500"
               />
             </div>
+          </div>
           )}
         </div>
       </header>
@@ -2169,6 +2207,17 @@ function DoctorBookingDirectoryContent() {
                               <Building2 className="h-3 w-3 shrink-0 text-blue-500" />
                               <span className="min-w-0 truncate">{doc.clinic_name} · {doc.room_number}</span>
                             </div>
+                            {(doc.clinic_city || doc.clinic_address) && (
+                              <div
+                                className="mt-1 flex min-w-0 items-center gap-1 text-[11px] font-medium leading-4 text-slate-500"
+                                title={[doc.clinic_address, doc.clinic_city].filter(Boolean).join(', ')}
+                              >
+                                <MapPin className="h-3 w-3 shrink-0 text-rose-500" />
+                                <span className="min-w-0 truncate">
+                                  {[doc.clinic_address, doc.clinic_city].filter(Boolean).join(', ')}
+                                </span>
+                              </div>
+                            )}
                           </div>
                         </div>
                         <span
