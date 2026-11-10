@@ -5,6 +5,8 @@ import { createPortal } from 'react-dom';
 import { useSearchParams } from 'next/navigation';
 import type { User as SupabaseUser } from '@supabase/supabase-js';
 import { patientSupabase } from '@/lib/supabase/patient-client';
+import IndianCityField from '@/app/components/IndianCityField';
+import { getCanonicalIndianCity, matchesIndianCity } from '@/lib/indian-cities';
 import { formatCompactOpdSessions, formatOpdSessions, getOpdSessions, OpdSession } from '@/lib/opd-schedule';
 import { getClinicDateString, getClinicDateTimeParts, getClinicDayRange } from '@/lib/clinic-day';
 import { 
@@ -30,13 +32,16 @@ import {
   LogOut,
   ChevronDown,
   History as HistoryIcon,
-  UserRound
+  UserRound,
+  MapPin,
 } from 'lucide-react';
 
 interface ClinicDirectoryRecord {
   id: string;
   name: string;
   booking_fee: number | string | null;
+  city: string | null;
+  address: string | null;
 }
 
 interface DepartmentDirectoryRecord {
@@ -94,6 +99,8 @@ interface DoctorDirectoryItem {
   opd_holiday_dates: string[];
   clinic_id: string;
   clinic_name: string;
+  clinic_city: string;
+  clinic_address: string;
   booking_fee: number;
   department_id: string | null;
   department_name: string;
@@ -885,7 +892,7 @@ function DoctorBookingDirectoryContent() {
         // Safe parallel queries using allSettled so one table never breaks the others
         const [docRes, clinicsRes, deptsRes, ticketsRes, ratingsRes] = await Promise.allSettled([
           patientSupabase.from('doctors').select('*').order('created_at', { ascending: false }),
-          patientSupabase.from('clinics').select('id, name, booking_fee'),
+          patientSupabase.from('clinics').select('id, name, booking_fee, city, address'),
           patientSupabase.from('departments').select('id, name'),
           patientSupabase
             .from('tickets')
@@ -944,6 +951,8 @@ function DoctorBookingDirectoryContent() {
             opd_holiday_dates: doc.opd_holiday_dates || [],
             clinic_id: doc.clinic_id || clinic?.id || '',
             clinic_name: clinic?.name || doc.clinic_name || 'Care Clinic',
+            clinic_city: clinic?.city?.trim() || '',
+            clinic_address: clinic?.address?.trim() || '',
             booking_fee: Number(clinic?.booking_fee) || 0,
             department_id: doc.department_id || null,
             department_name: deptName || 'General OPD',
@@ -1247,14 +1256,21 @@ function DoctorBookingDirectoryContent() {
     if (urlClinicId) {
       list = list.filter(d => d.clinic_id === urlClinicId);
     }
-    const q = searchQuery.toLowerCase().trim();
+    const q = searchQuery.trim().toLocaleLowerCase('en-IN');
     if (!q) return list;
+
+    const city = getCanonicalIndianCity(searchQuery);
+    if (city) {
+      return list.filter((doctor) => matchesIndianCity(doctor.clinic_city, city));
+    }
 
     return list.filter(
       (d) =>
-        d.name.toLowerCase().includes(q) ||
-        d.clinic_name.toLowerCase().includes(q) ||
-        d.department_name.toLowerCase().includes(q)
+        d.name.toLocaleLowerCase('en-IN').includes(q) ||
+        d.clinic_name.toLocaleLowerCase('en-IN').includes(q) ||
+        d.department_name.toLocaleLowerCase('en-IN').includes(q) ||
+        d.clinic_city.toLocaleLowerCase('en-IN').includes(q) ||
+        d.clinic_address.toLocaleLowerCase('en-IN').includes(q)
     );
   }, [doctors, searchQuery, urlClinicId]);
 
@@ -1553,8 +1569,8 @@ function DoctorBookingDirectoryContent() {
 
       {/* Header Banner */}
       <header className="sticky top-0 z-30 bg-slate-950 text-white border-b border-slate-800">
-        <div className="max-w-5xl mx-auto px-4 sm:px-6 py-5 sm:py-8">
-          <div className="flex flex-col gap-4 sm:gap-5">
+        <div className="max-w-5xl mx-auto px-4 sm:px-6 py-4 sm:py-5 lg:py-8">
+          <div className="flex flex-col gap-3 sm:gap-4 lg:gap-5">
             <div className="flex w-full flex-wrap items-center justify-between gap-3 sm:flex-nowrap sm:gap-4">
             <div className="flex w-full min-w-0 items-center gap-2.5 sm:w-auto sm:gap-3">
               <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-blue-600 text-white shadow-lg shadow-blue-500/25 sm:h-11 sm:w-11">
@@ -1566,25 +1582,25 @@ function DoctorBookingDirectoryContent() {
               </div>
             </div>
 
-            <div className="ml-auto flex shrink-0 items-center gap-2 sm:gap-2">
+            <div className="ml-auto flex w-full items-center gap-2 sm:w-auto sm:shrink-0">
               <button
                 type="button"
                 onClick={() => {
                   setActiveTab('DIRECTORY');
                   setConfirmedTicket(null);
                 }}
-                className="min-h-10 whitespace-nowrap rounded-xl bg-blue-600 px-3 py-2 text-xs font-bold text-white shadow-lg shadow-blue-900/20 transition-all hover:bg-blue-500 hover:shadow-blue-900/30 cursor-pointer sm:min-h-11 sm:px-4 sm:py-2.5"
+                className="min-h-10 min-w-0 basis-[calc(50%-0.25rem)] shrink-0 grow-0 whitespace-nowrap rounded-xl border border-transparent bg-blue-600 px-3 py-2 text-xs font-bold text-white shadow-lg shadow-blue-900/20 transition-all hover:bg-blue-500 hover:shadow-blue-900/30 cursor-pointer sm:min-h-11 sm:basis-auto sm:border-0 sm:px-4 sm:py-2.5 sm:flex-none"
               >
                 Book New Token
               </button>
 
               {currentUser && (
-                <div ref={profileMenuRef} className="relative">
+                <div ref={profileMenuRef} className="relative min-w-0 basis-[calc(50%-0.25rem)] shrink-0 grow-0 sm:basis-auto sm:flex-none">
                   <button
                     type="button"
                     aria-expanded={showProfileMenu}
                     onClick={() => setShowProfileMenu((open) => !open)}
-                    className="group flex min-h-10 min-w-0 max-w-56 items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-900 px-2 py-2 text-left shadow-lg shadow-black/10 transition-all hover:border-blue-400 hover:bg-slate-800 cursor-pointer sm:min-h-11 sm:gap-2 sm:px-2.5 sm:py-2.5"
+                    className="group flex min-h-10 w-full min-w-0 items-center justify-center gap-1.5 rounded-xl border border-slate-700 bg-slate-900 px-2 py-2 text-left shadow-lg shadow-black/10 transition-all hover:border-blue-400 hover:bg-slate-800 cursor-pointer sm:min-h-11 sm:w-auto sm:max-w-56 sm:gap-2 sm:px-2.5 sm:py-2.5"
                   >
                     <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-blue-400 to-indigo-500 text-[8px] font-black text-white shadow-inner sm:h-4 sm:w-4 sm:text-[9px]">
                       {(String(currentUser.user_metadata?.full_name || currentUser.email || 'P').trim().charAt(0) || 'P').toUpperCase()}
@@ -1596,14 +1612,14 @@ function DoctorBookingDirectoryContent() {
                   </button>
 
                   {showProfileMenu && (
-                    <div className="absolute right-0 top-[calc(100%+0.75rem)] z-40 w-64 overflow-hidden rounded-3xl border border-slate-200 bg-white text-slate-900 shadow-2xl shadow-slate-950/20">
+                    <div className="absolute right-0 top-[calc(100%+0.75rem)] z-40 w-72 max-w-[calc(100vw-2rem)] overflow-hidden rounded-3xl border border-slate-200 bg-white text-slate-900 shadow-2xl shadow-slate-950/20">
                       <div className="border-b border-slate-800 bg-slate-950 px-4 py-4 text-white">
-                        <div className="flex items-center gap-3">
+                        <div className="flex items-start gap-3">
                           <span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-blue-600 text-base font-black text-white ring-1 ring-blue-400">
                             {(String(currentUser.user_metadata?.full_name || currentUser.email || 'P').trim().charAt(0) || 'P').toUpperCase()}
                           </span>
-                          <div className="min-w-0">
-                            <p className="truncate text-sm font-black">{String(currentUser.user_metadata?.full_name || 'Patient')}</p>
+                          <div className="min-w-0 flex-1">
+                            <p className="whitespace-normal break-words text-sm font-black">{String(currentUser.user_metadata?.full_name || 'Patient')}</p>
                             <p className="truncate text-[11px] text-slate-400">{currentUser.email}</p>
                           </div>
                         </div>
@@ -1693,7 +1709,7 @@ function DoctorBookingDirectoryContent() {
                     setAuthTab('login');
                     setShowAuthModal(true);
                   }}
-                  className="flex items-center gap-1.5 rounded-xl border border-blue-500/40 bg-blue-600 px-3.5 py-2.5 text-xs font-bold text-white transition-colors hover:bg-blue-700 cursor-pointer"
+                  className="flex min-h-10 min-w-0 basis-[calc(50%-0.25rem)] shrink-0 grow-0 items-center justify-center gap-1.5 rounded-xl border border-blue-500/40 bg-blue-600 px-3 py-2.5 text-xs font-bold text-white transition-colors hover:bg-blue-700 cursor-pointer sm:min-h-11 sm:basis-auto sm:flex-none"
                 >
                   <UserRound className="h-3.5 w-3.5" />
                   Sign In
@@ -1705,24 +1721,29 @@ function DoctorBookingDirectoryContent() {
 
           {/* Search Box */}
           {activeTab === 'DIRECTORY' && (
-          <div className="relative mt-8 w-full max-w-2xl">
-              <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-slate-400">
-                <Search className="w-5 h-5" />
-              </div>
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search by doctor name, clinic, or specialty..."
-                className="w-full bg-slate-900/90 border border-slate-700/80 rounded-2xl pl-12 pr-4 py-3.5 text-sm text-white placeholder-slate-400 focus:outline-hidden focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all shadow-inner"
-              />
+          <div className="relative mt-5 w-full max-w-3xl sm:mt-6 lg:mt-8">
+            <div className="absolute inset-y-0 left-0 z-10 flex items-center pl-4 text-slate-400">
+              <Search className="h-5 w-5" />
             </div>
+            <label className="sr-only" htmlFor="doctor-directory-search">
+              Search doctors, clinics, specialties, cities, and addresses
+            </label>
+            <IndianCityField
+              id="doctor-directory-search"
+              required={false}
+              value={searchQuery}
+              onChange={setSearchQuery}
+              placeholder="Search doctors, clinics, or cities..."
+              showNoMatches={false}
+              className="w-full min-w-0 rounded-2xl border border-slate-700/80 bg-slate-900/90 py-3.5 pl-12 pr-4 text-sm text-white placeholder-slate-400 shadow-inner transition-all focus:border-transparent focus:outline-hidden focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
           )}
         </div>
       </header>
 
       {/* Main Container */}
-      <main className="max-w-5xl mx-auto px-4 sm:px-6 mt-8">
+      <main className="max-w-5xl mx-auto px-4 sm:px-6 mt-8 sm:mt-10">
         
         {/* VIEW 1: ACTIVE / CONFIRMED TOKEN SLIP & LIVE TRACKER */}
         {confirmedTicket && (
@@ -2102,11 +2123,11 @@ function DoctorBookingDirectoryContent() {
         {/* VIEW 3: DOCTOR DIRECTORY LIST */}
         {activeTab === 'DIRECTORY' && !confirmedTicket && (
           <div>
-            <div className="flex items-center justify-between mb-4">
+            <div className="mb-4 flex flex-col items-start gap-1 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
               <h2 className="text-sm font-black text-slate-500 uppercase tracking-wider">
                 Available Doctors ({filteredDoctors.length})
               </h2>
-              <span className="text-xs text-slate-400">Live OPD Queue Enabled</span>
+              <span className="text-[11px] text-slate-400 sm:text-xs">Live OPD Queue Enabled</span>
             </div>
 
             {queueRefreshFailed && (
@@ -2169,6 +2190,17 @@ function DoctorBookingDirectoryContent() {
                               <Building2 className="h-3 w-3 shrink-0 text-blue-500" />
                               <span className="min-w-0 truncate">{doc.clinic_name} · {doc.room_number}</span>
                             </div>
+                            {(doc.clinic_city || doc.clinic_address) && (
+                              <div
+                                className="mt-1 flex min-w-0 items-start gap-1 text-[11px] font-medium leading-4 text-slate-500"
+                                title={[doc.clinic_address, doc.clinic_city].filter(Boolean).join(', ')}
+                              >
+                                <MapPin className="h-3 w-3 shrink-0 text-rose-500" />
+                                <span className="min-w-0 flex-1 whitespace-normal break-words">
+                                  {[doc.clinic_address, doc.clinic_city].filter(Boolean).join(', ')}
+                                </span>
+                              </div>
+                            )}
                           </div>
                         </div>
                         <span

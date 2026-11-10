@@ -1,9 +1,10 @@
 'use client';
 
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
 import { useSearchParams, useRouter, usePathname } from 'next/navigation';
 import { supabase } from '@/lib/supabase/client';
 import QRCode from 'qrcode';
+import { createPortal } from 'react-dom';
 
 import { 
   Users, 
@@ -32,7 +33,8 @@ import {
   Search,
   ChevronDown,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  MapPin,
 } from 'lucide-react';
 import { Department, Doctor } from '@/lib/types';
 import { getClinicDateRange, getClinicDateString, getClinicDayRange } from '@/lib/clinic-day';
@@ -47,6 +49,8 @@ import {
 } from '@/lib/opd-schedule';
 import { getErrorMessage } from '@/lib/error-message';
 import { readPushNotificationResponse } from '@/lib/push-notification-response';
+import IndianCityField from '@/app/components/IndianCityField';
+import { getCanonicalIndianCity } from '@/lib/indian-cities';
 
 interface ExtendedDoctor extends Doctor {
   clinic_id?: string | null;
@@ -59,6 +63,13 @@ interface ExtendedDoctor extends Doctor {
   opd_holiday_dates?: string[] | null;
   broadcast_message?: string | null;
   opd_status?: 'LIVE' | 'PAUSED';
+}
+
+interface ClinicLocation {
+  id: string;
+  name: string;
+  city: string | null;
+  address: string | null;
 }
 
 interface QueueTicket {
@@ -104,10 +115,15 @@ export default function ReceptionDeskPage() {
 
   const [departments, setDepartments] = useState<Department[]>([]);
   const [doctors, setDoctors] = useState<ExtendedDoctor[]>([]);
+  const [clinics, setClinics] = useState<ClinicLocation[]>([]);
   const [selectedDoctorId, setSelectedDoctorId] = useState<string>('');
   const currentDoctor = useMemo(
     () => doctors.find((doctor) => doctor.id === selectedDoctorId) || null,
     [doctors, selectedDoctorId]
+  );
+  const currentClinic = useMemo(
+    () => clinics.find((clinic) => clinic.id === currentDoctor?.clinic_id) || null,
+    [clinics, currentDoctor]
   );
 
   const [queueTickets, setQueueTickets] = useState<QueueTicket[]>([]);
@@ -139,6 +155,8 @@ export default function ReceptionDeskPage() {
   const [showLogoutModal, setShowLogoutModal] = useState<boolean>(false);
   const [showDoctorProfile, setShowDoctorProfile] = useState(false);
   const [showDoctorEdit, setShowDoctorEdit] = useState(false);
+  const [clinicCity, setClinicCity] = useState('');
+  const [clinicAddress, setClinicAddress] = useState('');
   const [doctorEditName, setDoctorEditName] = useState('');
   const [doctorEditRoom, setDoctorEditRoom] = useState('');
   const [doctorEditFee, setDoctorEditFee] = useState('');
@@ -155,19 +173,53 @@ export default function ReceptionDeskPage() {
   const [clinicQrError, setClinicQrError] = useState('');
   const callChimeAudioContextRef = useRef<AudioContext | null>(null);
   const doctorProfileRef = useRef<HTMLDivElement>(null);
+  const doctorProfileButtonRef = useRef<HTMLButtonElement>(null);
+  const doctorProfileMenuRef = useRef<HTMLDivElement>(null);
+  const [doctorProfilePosition, setDoctorProfilePosition] = useState<{ top: number; left: number; width: number; maxHeight: number } | null>(null);
+
+  const updateDoctorProfilePosition = useCallback(() => {
+    const button = doctorProfileButtonRef.current;
+    if (!button) return;
+
+    const rect = button.getBoundingClientRect();
+    const width = Math.min(288, window.innerWidth - 32);
+    const left = Math.max(16, Math.min(rect.right - width, window.innerWidth - width - 16));
+    const top = rect.bottom + 12;
+
+    setDoctorProfilePosition({
+      top,
+      left,
+      width,
+      maxHeight: Math.max(0, window.innerHeight - top - 16),
+    });
+  }, []);
 
   useEffect(() => {
     if (!showDoctorProfile) return;
 
     const closeDoctorProfileOnOutsideClick = (event: PointerEvent) => {
-      if (event.target instanceof Node && !doctorProfileRef.current?.contains(event.target)) {
+      if (
+        event.target instanceof Node
+        && !doctorProfileRef.current?.contains(event.target)
+        && !doctorProfileMenuRef.current?.contains(event.target)
+      ) {
         setShowDoctorProfile(false);
       }
     };
 
+    window.addEventListener('resize', updateDoctorProfilePosition);
+    window.addEventListener('scroll', updateDoctorProfilePosition, true);
     document.addEventListener('pointerdown', closeDoctorProfileOnOutsideClick);
-    return () => document.removeEventListener('pointerdown', closeDoctorProfileOnOutsideClick);
-  }, [showDoctorProfile]);
+    return () => {
+      window.removeEventListener('resize', updateDoctorProfilePosition);
+      window.removeEventListener('scroll', updateDoctorProfilePosition, true);
+      document.removeEventListener('pointerdown', closeDoctorProfileOnOutsideClick);
+    };
+  }, [showDoctorProfile, updateDoctorProfilePosition]);
+
+  useLayoutEffect(() => {
+    if (showDoctorProfile) updateDoctorProfilePosition();
+  }, [showDoctorProfile, updateDoctorProfilePosition]);
 
   const clinicBookingUrl = useMemo(() => {
     if (!currentDoctor?.clinic_id || typeof window === 'undefined') return '';
@@ -301,7 +353,7 @@ export default function ReceptionDeskPage() {
 
         const { data: clinics, error: clinicsError } = await supabase
           .from('clinics')
-          .select('id')
+          .select('id, name, city, address')
           .eq('owner_id', session.user.id);
 
         if (clinicsError) throw clinicsError;
@@ -319,6 +371,7 @@ export default function ReceptionDeskPage() {
         if (deptRes.error) throw deptRes.error;
 
         const docs = (docRes.data || []) as ExtendedDoctor[];
+        setClinics((clinics || []) as ClinicLocation[]);
         setDoctors(docs);
         setDepartments(deptRes.data || []);
 
@@ -912,6 +965,8 @@ export default function ReceptionDeskPage() {
     setDoctorEditName(currentDoctor.name || '');
     setDoctorEditRoom(currentDoctor.room_number || '');
     setDoctorEditFee(String(currentDoctor.consultation_fee ?? 500));
+    setClinicCity(currentClinic?.city || '');
+    setClinicAddress(currentClinic?.address || '');
     setDoctorEditError('');
     setNewOpdSessions(getOpdSessions(currentDoctor.opd_sessions, currentDoctor.opd_shift, currentDoctor.opd_timing));
     setNewWeeklyOffDays(currentDoctor.weekly_off_days || []);
@@ -934,6 +989,16 @@ export default function ReceptionDeskPage() {
     }
     if (!roomNumber) {
       setDoctorEditError('Room number is required.');
+      return;
+    }
+    const city = currentClinic ? getCanonicalIndianCity(clinicCity) : null;
+    const address = clinicAddress.trim();
+    if (currentClinic && !city) {
+      setDoctorEditError('Select a clinic city from the Indian city suggestions.');
+      return;
+    }
+    if (currentClinic && !address) {
+      setDoctorEditError('Clinic street address is required.');
       return;
     }
     if (!Number.isFinite(fee) || fee < 0) {
@@ -990,8 +1055,28 @@ export default function ReceptionDeskPage() {
             }
           : doctor
       ));
+
+      if (currentClinic && city) {
+        try {
+          const { error: clinicError } = await supabase
+            .from('clinics')
+            .update({ city, address })
+            .eq('id', currentClinic.id);
+          if (clinicError) throw clinicError;
+        } catch (clinicError: unknown) {
+          setDoctorEditError(
+            `Doctor profile was saved, but the clinic address could not be updated: ${getErrorMessage(clinicError, 'Unknown error')}`
+          );
+          return;
+        }
+
+        setClinics((previousClinics) => previousClinics.map((clinic) =>
+          clinic.id === currentClinic.id ? { ...clinic, city, address } : clinic
+        ));
+      }
+
       setShowDoctorEdit(false);
-      setSuccessMsg('Doctor profile and OPD schedule updated successfully.');
+      setSuccessMsg('Doctor profile, clinic address, and OPD schedule updated successfully.');
     } catch (error: unknown) {
       setDoctorEditError(getErrorMessage(error, 'Failed to update doctor profile.'));
     } finally {
@@ -1118,10 +1203,10 @@ export default function ReceptionDeskPage() {
             </div>
           </div>
 
-          <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_max-content] items-stretch gap-1.5 sm:gap-2 lg:flex lg:flex-wrap lg:items-center lg:gap-3">
+          <div className="no-scrollbar flex w-full min-w-0 flex-nowrap items-center gap-1.5 overflow-x-auto overscroll-x-contain touch-pan-x pb-1 sm:gap-2 lg:w-auto lg:flex-wrap lg:gap-3 lg:overflow-visible lg:pb-0">
             {/* Show Dropdown only if in Multi-Doctor Hospital mode */}
             {!isSoloClinicMode && (
-              <div className="col-span-3 flex min-w-0 items-center space-x-2 rounded-xl border border-slate-300 bg-slate-50 p-1.5 lg:col-span-1">
+              <div className="flex shrink-0 items-center space-x-2 rounded-xl border border-slate-300 bg-slate-50 p-1.5">
                 <Stethoscope className="w-4 h-4 text-slate-500 ml-1.5" />
                 <select
                   value={selectedDoctorId}
@@ -1130,7 +1215,7 @@ export default function ReceptionDeskPage() {
                     setSelectedDoctorId(newId);    
                     router.push(`${pathname}?doctor_id=${newId}`);
                   }}
-                  className="bg-transparent text-slate-900 text-xs font-bold rounded-lg pr-2 py-1 focus:outline-hidden"
+                  className="shrink-0 whitespace-nowrap bg-transparent text-xs font-bold text-slate-900 rounded-lg pr-2 py-1 focus:outline-hidden"
                 >
                   {doctors.map((doc) => (
                     <option key={doc.id} value={doc.id}>
@@ -1144,48 +1229,67 @@ export default function ReceptionDeskPage() {
             {/* Quick Add Walk-in Button */}
             <button
               onClick={() => setShowWalkinModal(true)}
-              className="flex min-w-0 items-center justify-center gap-1 rounded-xl bg-blue-600 px-1.5 py-2 text-[10px] font-bold text-white shadow-sm transition-colors hover:bg-blue-700 sm:gap-1.5 sm:px-2.5 sm:py-2.5 sm:text-xs lg:gap-2 lg:px-4"
+              className="flex shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-xl bg-blue-600 px-2.5 py-2 text-[10px] font-bold text-white shadow-sm transition-colors hover:bg-blue-700 sm:gap-1.5 sm:px-2.5 sm:py-2.5 sm:text-xs lg:gap-2 lg:px-4"
             >
               <UserPlus className="h-3.5 w-3.5 shrink-0 sm:h-4 sm:w-4" />
-              <span className="truncate">+ Add Walk-In</span>
+              <span className="whitespace-nowrap">+ Add Walk-In</span>
             </button>
 
             {/* Zero-typing walk-in token */}
             <button
               onClick={() => setShowQuickTokenModal(true)}
               disabled={actionLoading || !currentDoctor}
-              className="flex min-w-0 items-center justify-center gap-1 rounded-xl bg-blue-600 px-1.5 py-2 text-[10px] font-bold text-white shadow-sm transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50 sm:gap-1.5 sm:px-2.5 sm:py-2.5 sm:text-xs lg:gap-2 lg:px-4"
+              className="flex shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-xl bg-blue-600 px-2.5 py-2 text-[10px] font-bold text-white shadow-sm transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50 sm:gap-1.5 sm:px-2.5 sm:py-2.5 sm:text-xs lg:gap-2 lg:px-4"
               title="Generate a token without entering patient details"
             >
               <Printer className="h-3.5 w-3.5 shrink-0 sm:h-4 sm:w-4" />
-              <span className="truncate">Quick Token</span>
+              <span className="whitespace-nowrap">Quick Token</span>
             </button>
 
             {/* Doctor Profile */}
-            <div ref={doctorProfileRef} className="relative min-w-0 max-w-[45vw]">
+            <div ref={doctorProfileRef} className="relative w-max shrink-0">
               <button
-                onClick={() => setShowDoctorProfile((open) => !open)}
+                ref={doctorProfileButtonRef}
+                onClick={() => {
+                  if (showDoctorProfile) {
+                    setShowDoctorProfile(false);
+                  } else {
+                    updateDoctorProfilePosition();
+                    setShowDoctorProfile(true);
+                  }
+                }}
                 disabled={!currentDoctor}
-                className="group flex min-w-0 w-full items-center justify-center gap-1 rounded-xl bg-blue-600 px-1.5 py-2 text-[10px] font-bold text-white shadow-sm transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50 sm:gap-1.5 sm:px-2.5 sm:py-2.5 sm:text-xs lg:gap-2 lg:px-4"
+                className="group flex w-max shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-xl bg-blue-600 px-2.5 py-2 text-[10px] font-bold text-white shadow-sm transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50 sm:gap-1.5 sm:px-2.5 sm:py-2.5 sm:text-xs lg:gap-2 lg:px-4"
                 title="Open doctor profile"
                 aria-expanded={showDoctorProfile}
+                aria-controls="doctor-profile-menu"
               >
                 <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-lg bg-white/20 text-[8px] font-black text-white sm:h-4 sm:w-4 sm:rounded-lg sm:text-[9px]">
                   {(currentDoctor?.name?.trim().charAt(0) || 'D').toUpperCase()}
                 </span>
-                <span className="min-w-0 truncate">{currentDoctor?.name || 'Doctor'}</span>
+                <span className="whitespace-nowrap">{currentDoctor?.name || 'Doctor'}</span>
                 <ChevronDown className={`h-3.5 w-3.5 shrink-0 text-blue-100 transition-transform group-hover:text-white sm:h-4 sm:w-4 ${showDoctorProfile ? 'rotate-180' : ''}`} />
               </button>
 
-              {showDoctorProfile && currentDoctor && (
-                <div className="absolute right-0 top-[calc(100%+0.75rem)] z-40 w-64 overflow-hidden rounded-3xl border border-slate-200 bg-white text-slate-900 shadow-2xl shadow-slate-950/20">
+              {showDoctorProfile && currentDoctor && doctorProfilePosition && typeof document !== 'undefined' && createPortal(
+                <div
+                  id="doctor-profile-menu"
+                  ref={doctorProfileMenuRef}
+                  className="fixed z-50 overflow-y-auto overscroll-contain rounded-3xl border border-slate-200 bg-white text-slate-900 shadow-2xl shadow-slate-950/20"
+                  style={{
+                    top: doctorProfilePosition.top,
+                    left: doctorProfilePosition.left,
+                    width: doctorProfilePosition.width,
+                    maxHeight: doctorProfilePosition.maxHeight,
+                  }}
+                >
                   <div className="border-b border-blue-100 bg-blue-50 px-4 py-4 text-slate-900">
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-start gap-3">
                       <span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-blue-600 text-base font-black text-white shadow-sm">
                         {(currentDoctor.name?.trim().charAt(0) || 'D').toUpperCase()}
                       </span>
-                      <div className="min-w-0">
-                        <p className="truncate text-sm font-black">{currentDoctor.name}</p>
+                      <div className="min-w-0 flex-1">
+                        <p className="whitespace-normal break-words text-sm font-black">{currentDoctor.name}</p>
                         <p className="truncate text-[11px] text-slate-500">{currentDoctor.clinic_name || 'Clinic'} · Room {currentDoctor.room_number}</p>
                       </div>
                     </div>
@@ -1240,7 +1344,8 @@ export default function ReceptionDeskPage() {
                       <span>Log Out</span>
                     </button>
                   </div>
-                </div>
+                </div>,
+                document.body
               )}
             </div>
           </div>
@@ -1724,12 +1829,6 @@ export default function ReceptionDeskPage() {
               </p>
             </div>
             <div className="flex items-center justify-between gap-4 sm:justify-end">
-              <div className="text-right">
-                <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">
-                  Completed visits · {completedHistoryTickets.length}
-                </p>
-                <p className="text-xs font-bold text-slate-700">Paid total: {formatCurrency(completedHistoryPaidTotal)}</p>
-              </div>
               <button
                 type="button"
                 onClick={handleDownloadHistory}
@@ -1739,6 +1838,23 @@ export default function ReceptionDeskPage() {
                 <Download className="h-4 w-4" />
                 Download CSV
               </button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-3 border-b border-slate-200 p-4 sm:grid-cols-2">
+            <div className="rounded-2xl border border-blue-100 bg-blue-50/70 px-4 py-3">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-blue-700">Completed visits</p>
+              <p className="mt-1 text-2xl font-black tracking-tight text-slate-900">
+                {historyLoading ? '—' : completedHistoryTickets.length}
+              </p>
+              <p className="mt-0.5 text-[11px] text-slate-500">For the selected doctor and date range</p>
+            </div>
+            <div className="rounded-2xl border border-emerald-100 bg-emerald-50/70 px-4 py-3">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-emerald-700">Paid total</p>
+              <p className="mt-1 text-2xl font-black tracking-tight text-slate-900">
+                {historyLoading ? '—' : formatCurrency(completedHistoryPaidTotal)}
+              </p>
+              <p className="mt-0.5 text-[11px] text-slate-500">Collected for completed visits</p>
             </div>
           </div>
 
@@ -2469,6 +2585,37 @@ export default function ReceptionDeskPage() {
                   </label>
                 </div>
               </section>
+
+              {currentClinic && (
+                <section className="rounded-2xl border border-slate-200 p-4 sm:p-5">
+                  <div className="mb-4 flex items-center gap-3">
+                    <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-rose-50 text-rose-600"><MapPin className="h-4 w-4" /></span>
+                    <div>
+                      <h4 className="text-sm font-extrabold text-slate-900">Clinic address</h4>
+                      <p className="text-xs text-slate-500">Patients use the city to find doctors nearby.</p>
+                    </div>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="block text-xs font-bold text-slate-700">City
+                      <IndianCityField
+                        id="doctor-profile-clinic-city"
+                        value={clinicCity}
+                        onChange={setClinicCity}
+                        className="mt-1.5 w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-3 text-sm text-slate-900 outline-none transition focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-100"
+                      />
+                    </label>
+                    <label className="block text-xs font-bold text-slate-700">Street address
+                      <input
+                        required
+                        autoComplete="street-address"
+                        value={clinicAddress}
+                        onChange={(event) => setClinicAddress(event.target.value)}
+                        className="mt-1.5 w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-3 text-sm text-slate-900 outline-none transition focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-100"
+                      />
+                    </label>
+                  </div>
+                </section>
+              )}
 
               <section className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4 sm:p-5">
                 <div className="mb-4 flex flex-wrap items-center justify-between gap-3">

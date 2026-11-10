@@ -36,3 +36,13 @@ npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+
+## Clinic addresses and city search
+
+Apply `supabase/migrations/20261110000100_add_clinic_location.sql` to add clinic city and
+street address fields. Clinic registration requires both values; clinic owners can update
+them from the reception doctor profile menu. City fields search a nationwide list of
+Indian cities and towns and only accept listed places. The list uses GeoNames `cities500`
+data (places with population over 500 or administrative seats through PPLA4), under CC BY 4.0:
+[GeoNames](https://www.geonames.org/). Patients can filter the doctor directory by city or
+search by clinic address.
