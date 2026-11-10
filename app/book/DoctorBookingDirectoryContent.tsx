@@ -6,7 +6,7 @@ import { useSearchParams } from 'next/navigation';
 import type { User as SupabaseUser } from '@supabase/supabase-js';
 import { patientSupabase } from '@/lib/supabase/patient-client';
 import IndianCityField from '@/app/components/IndianCityField';
-import { matchesIndianCity } from '@/lib/indian-cities';
+import { getCanonicalIndianCity, matchesIndianCity } from '@/lib/indian-cities';
 import { formatCompactOpdSessions, formatOpdSessions, getOpdSessions, OpdSession } from '@/lib/opd-schedule';
 import { getClinicDateString, getClinicDateTimeParts, getClinicDayRange } from '@/lib/clinic-day';
 import { 
@@ -220,7 +220,6 @@ function DoctorBookingDirectoryContent() {
   const [scheduleUpdateToast, setScheduleUpdateToast] = useState('');
   const scheduleSnapshotRef = useRef<Map<string, string> | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [selectedCity, setSelectedCity] = useState('');
   const [currentTime, setCurrentTime] = useState(() => new Date());
   const [scheduleTooltip, setScheduleTooltip] = useState<{
     id: string;
@@ -1257,21 +1256,23 @@ function DoctorBookingDirectoryContent() {
     if (urlClinicId) {
       list = list.filter(d => d.clinic_id === urlClinicId);
     }
-    if (selectedCity) {
-      list = list.filter((doctor) => matchesIndianCity(doctor.clinic_city, selectedCity));
-    }
-    const q = searchQuery.toLowerCase().trim();
+    const q = searchQuery.trim().toLocaleLowerCase('en-IN');
     if (!q) return list;
+
+    const city = getCanonicalIndianCity(searchQuery);
+    if (city) {
+      return list.filter((doctor) => matchesIndianCity(doctor.clinic_city, city));
+    }
 
     return list.filter(
       (d) =>
-        d.name.toLowerCase().includes(q) ||
-        d.clinic_name.toLowerCase().includes(q) ||
-        d.department_name.toLowerCase().includes(q) ||
-        d.clinic_city.toLowerCase().includes(q) ||
-        d.clinic_address.toLowerCase().includes(q)
+        d.name.toLocaleLowerCase('en-IN').includes(q) ||
+        d.clinic_name.toLocaleLowerCase('en-IN').includes(q) ||
+        d.department_name.toLocaleLowerCase('en-IN').includes(q) ||
+        d.clinic_city.toLocaleLowerCase('en-IN').includes(q) ||
+        d.clinic_address.toLocaleLowerCase('en-IN').includes(q)
     );
-  }, [doctors, searchQuery, selectedCity, urlClinicId]);
+  }, [doctors, searchQuery, urlClinicId]);
 
   // 4. Quick Booking Submission
   const handleBooking = async (e: React.FormEvent) => {
@@ -1720,40 +1721,22 @@ function DoctorBookingDirectoryContent() {
 
           {/* Search Box */}
           {activeTab === 'DIRECTORY' && (
-          <div className="mt-8 grid w-full max-w-3xl grid-cols-1 gap-3 sm:grid-cols-[minmax(14rem,1fr)_minmax(0,2fr)]">
-            <div className="relative min-w-0">
-              <label className="sr-only" htmlFor="doctor-directory-city">Filter doctors by city</label>
-              <IndianCityField
-                id="doctor-directory-city"
-                required={false}
-                value={selectedCity}
-                onChange={setSelectedCity}
-                placeholder="Filter by city or town"
-                className="w-full rounded-2xl border border-slate-700/80 bg-slate-900/90 px-4 py-3.5 pr-14 text-sm font-semibold text-white placeholder-slate-400 focus:outline-hidden focus:ring-2 focus:ring-blue-500"
-              />
-              {selectedCity && (
-                <button
-                  type="button"
-                  onClick={() => setSelectedCity('')}
-                  aria-label="Clear city filter"
-                  className="absolute inset-y-0 right-3 text-xs font-bold text-slate-300 hover:text-white"
-                >
-                  Clear
-                </button>
-              )}
+          <div className="relative mt-8 w-full max-w-3xl">
+            <div className="absolute inset-y-0 left-0 z-10 flex items-center pl-4 text-slate-400">
+              <Search className="h-5 w-5" />
             </div>
-            <div className="relative min-w-0">
-              <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-slate-400">
-                <Search className="w-5 h-5" />
-              </div>
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search doctor, clinic, city, or address..."
-                className="w-full min-w-0 rounded-2xl border border-slate-700/80 bg-slate-900/90 py-3.5 pl-12 pr-4 text-sm text-white placeholder-slate-400 shadow-inner transition-all focus:border-transparent focus:outline-hidden focus:ring-2 focus:ring-blue-500"
-              />
-            </div>
+            <label className="sr-only" htmlFor="doctor-directory-search">
+              Search doctors, clinics, specialties, cities, and addresses
+            </label>
+            <IndianCityField
+              id="doctor-directory-search"
+              required={false}
+              value={searchQuery}
+              onChange={setSearchQuery}
+              placeholder="Search doctors, clinics, cities, or addresses..."
+              showNoMatches={false}
+              className="w-full min-w-0 rounded-2xl border border-slate-700/80 bg-slate-900/90 py-3.5 pl-12 pr-4 text-sm text-white placeholder-slate-400 shadow-inner transition-all focus:border-transparent focus:outline-hidden focus:ring-2 focus:ring-blue-500"
+            />
           </div>
           )}
         </div>

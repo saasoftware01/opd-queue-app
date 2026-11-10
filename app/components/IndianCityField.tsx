@@ -10,6 +10,7 @@ interface IndianCityFieldProps {
   className: string;
   required?: boolean;
   placeholder?: string;
+  showNoMatches?: boolean;
 }
 
 export default function IndianCityField({
@@ -19,6 +20,7 @@ export default function IndianCityField({
   className,
   required = true,
   placeholder = 'Type a city or town name',
+  showNoMatches = true,
 }: IndianCityFieldProps) {
   const [activeIndex, setActiveIndex] = useState(-1);
   const [isFocused, setIsFocused] = useState(false);
@@ -78,7 +80,7 @@ export default function IndianCityField({
         placeholder={placeholder}
         className={className}
       />
-      {isFocused && normalizedQuery && (
+      {isFocused && normalizedQuery && (suggestions.length > 0 || showNoMatches) && (
         <ul
           id={listId}
           role="listbox"
