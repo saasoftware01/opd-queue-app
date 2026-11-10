@@ -1,9 +1,10 @@
 'use client';
 
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
 import { useSearchParams, useRouter, usePathname } from 'next/navigation';
 import { supabase } from '@/lib/supabase/client';
 import QRCode from 'qrcode';
+import { createPortal } from 'react-dom';
 
 import { 
   Users, 
@@ -172,19 +173,53 @@ export default function ReceptionDeskPage() {
   const [clinicQrError, setClinicQrError] = useState('');
   const callChimeAudioContextRef = useRef<AudioContext | null>(null);
   const doctorProfileRef = useRef<HTMLDivElement>(null);
+  const doctorProfileButtonRef = useRef<HTMLButtonElement>(null);
+  const doctorProfileMenuRef = useRef<HTMLDivElement>(null);
+  const [doctorProfilePosition, setDoctorProfilePosition] = useState<{ top: number; left: number; width: number; maxHeight: number } | null>(null);
+
+  const updateDoctorProfilePosition = useCallback(() => {
+    const button = doctorProfileButtonRef.current;
+    if (!button) return;
+
+    const rect = button.getBoundingClientRect();
+    const width = Math.min(288, window.innerWidth - 32);
+    const left = Math.max(16, Math.min(rect.right - width, window.innerWidth - width - 16));
+    const top = rect.bottom + 12;
+
+    setDoctorProfilePosition({
+      top,
+      left,
+      width,
+      maxHeight: Math.max(0, window.innerHeight - top - 16),
+    });
+  }, []);
 
   useEffect(() => {
     if (!showDoctorProfile) return;
 
     const closeDoctorProfileOnOutsideClick = (event: PointerEvent) => {
-      if (event.target instanceof Node && !doctorProfileRef.current?.contains(event.target)) {
+      if (
+        event.target instanceof Node
+        && !doctorProfileRef.current?.contains(event.target)
+        && !doctorProfileMenuRef.current?.contains(event.target)
+      ) {
         setShowDoctorProfile(false);
       }
     };
 
+    window.addEventListener('resize', updateDoctorProfilePosition);
+    window.addEventListener('scroll', updateDoctorProfilePosition, true);
     document.addEventListener('pointerdown', closeDoctorProfileOnOutsideClick);
-    return () => document.removeEventListener('pointerdown', closeDoctorProfileOnOutsideClick);
-  }, [showDoctorProfile]);
+    return () => {
+      window.removeEventListener('resize', updateDoctorProfilePosition);
+      window.removeEventListener('scroll', updateDoctorProfilePosition, true);
+      document.removeEventListener('pointerdown', closeDoctorProfileOnOutsideClick);
+    };
+  }, [showDoctorProfile, updateDoctorProfilePosition]);
+
+  useLayoutEffect(() => {
+    if (showDoctorProfile) updateDoctorProfilePosition();
+  }, [showDoctorProfile, updateDoctorProfilePosition]);
 
   const clinicBookingUrl = useMemo(() => {
     if (!currentDoctor?.clinic_id || typeof window === 'undefined') return '';
@@ -1168,10 +1203,10 @@ export default function ReceptionDeskPage() {
             </div>
           </div>
 
-          <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_max-content] items-stretch gap-1.5 sm:gap-2 lg:flex lg:flex-wrap lg:items-center lg:gap-3">
+          <div className="no-scrollbar flex w-full min-w-0 flex-nowrap items-center gap-1.5 overflow-x-auto overscroll-x-contain touch-pan-x pb-1 sm:gap-2 lg:w-auto lg:flex-wrap lg:gap-3 lg:overflow-visible lg:pb-0">
             {/* Show Dropdown only if in Multi-Doctor Hospital mode */}
             {!isSoloClinicMode && (
-              <div className="col-span-3 flex min-w-0 items-center space-x-2 rounded-xl border border-slate-300 bg-slate-50 p-1.5 lg:col-span-1">
+              <div className="flex shrink-0 items-center space-x-2 rounded-xl border border-slate-300 bg-slate-50 p-1.5">
                 <Stethoscope className="w-4 h-4 text-slate-500 ml-1.5" />
                 <select
                   value={selectedDoctorId}
@@ -1180,7 +1215,7 @@ export default function ReceptionDeskPage() {
                     setSelectedDoctorId(newId);    
                     router.push(`${pathname}?doctor_id=${newId}`);
                   }}
-                  className="bg-transparent text-slate-900 text-xs font-bold rounded-lg pr-2 py-1 focus:outline-hidden"
+                  className="shrink-0 whitespace-nowrap bg-transparent text-xs font-bold text-slate-900 rounded-lg pr-2 py-1 focus:outline-hidden"
                 >
                   {doctors.map((doc) => (
                     <option key={doc.id} value={doc.id}>
@@ -1194,48 +1229,67 @@ export default function ReceptionDeskPage() {
             {/* Quick Add Walk-in Button */}
             <button
               onClick={() => setShowWalkinModal(true)}
-              className="flex min-w-0 items-center justify-center gap-1 rounded-xl bg-blue-600 px-1.5 py-2 text-[10px] font-bold text-white shadow-sm transition-colors hover:bg-blue-700 sm:gap-1.5 sm:px-2.5 sm:py-2.5 sm:text-xs lg:gap-2 lg:px-4"
+              className="flex shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-xl bg-blue-600 px-2.5 py-2 text-[10px] font-bold text-white shadow-sm transition-colors hover:bg-blue-700 sm:gap-1.5 sm:px-2.5 sm:py-2.5 sm:text-xs lg:gap-2 lg:px-4"
             >
               <UserPlus className="h-3.5 w-3.5 shrink-0 sm:h-4 sm:w-4" />
-              <span className="truncate">+ Add Walk-In</span>
+              <span className="whitespace-nowrap">+ Add Walk-In</span>
             </button>
 
             {/* Zero-typing walk-in token */}
             <button
               onClick={() => setShowQuickTokenModal(true)}
               disabled={actionLoading || !currentDoctor}
-              className="flex min-w-0 items-center justify-center gap-1 rounded-xl bg-blue-600 px-1.5 py-2 text-[10px] font-bold text-white shadow-sm transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50 sm:gap-1.5 sm:px-2.5 sm:py-2.5 sm:text-xs lg:gap-2 lg:px-4"
+              className="flex shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-xl bg-blue-600 px-2.5 py-2 text-[10px] font-bold text-white shadow-sm transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50 sm:gap-1.5 sm:px-2.5 sm:py-2.5 sm:text-xs lg:gap-2 lg:px-4"
               title="Generate a token without entering patient details"
             >
               <Printer className="h-3.5 w-3.5 shrink-0 sm:h-4 sm:w-4" />
-              <span className="truncate">Quick Token</span>
+              <span className="whitespace-nowrap">Quick Token</span>
             </button>
 
             {/* Doctor Profile */}
-            <div ref={doctorProfileRef} className="relative min-w-0 max-w-[45vw]">
+            <div ref={doctorProfileRef} className="relative w-max shrink-0">
               <button
-                onClick={() => setShowDoctorProfile((open) => !open)}
+                ref={doctorProfileButtonRef}
+                onClick={() => {
+                  if (showDoctorProfile) {
+                    setShowDoctorProfile(false);
+                  } else {
+                    updateDoctorProfilePosition();
+                    setShowDoctorProfile(true);
+                  }
+                }}
                 disabled={!currentDoctor}
-                className="group flex min-w-0 w-full items-center justify-center gap-1 rounded-xl bg-blue-600 px-1.5 py-2 text-[10px] font-bold text-white shadow-sm transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50 sm:gap-1.5 sm:px-2.5 sm:py-2.5 sm:text-xs lg:gap-2 lg:px-4"
+                className="group flex w-max shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-xl bg-blue-600 px-2.5 py-2 text-[10px] font-bold text-white shadow-sm transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50 sm:gap-1.5 sm:px-2.5 sm:py-2.5 sm:text-xs lg:gap-2 lg:px-4"
                 title="Open doctor profile"
                 aria-expanded={showDoctorProfile}
+                aria-controls="doctor-profile-menu"
               >
                 <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-lg bg-white/20 text-[8px] font-black text-white sm:h-4 sm:w-4 sm:rounded-lg sm:text-[9px]">
                   {(currentDoctor?.name?.trim().charAt(0) || 'D').toUpperCase()}
                 </span>
-                <span className="min-w-0 truncate">{currentDoctor?.name || 'Doctor'}</span>
+                <span className="whitespace-nowrap">{currentDoctor?.name || 'Doctor'}</span>
                 <ChevronDown className={`h-3.5 w-3.5 shrink-0 text-blue-100 transition-transform group-hover:text-white sm:h-4 sm:w-4 ${showDoctorProfile ? 'rotate-180' : ''}`} />
               </button>
 
-              {showDoctorProfile && currentDoctor && (
-                <div className="absolute right-0 top-[calc(100%+0.75rem)] z-40 w-64 overflow-hidden rounded-3xl border border-slate-200 bg-white text-slate-900 shadow-2xl shadow-slate-950/20">
+              {showDoctorProfile && currentDoctor && doctorProfilePosition && typeof document !== 'undefined' && createPortal(
+                <div
+                  id="doctor-profile-menu"
+                  ref={doctorProfileMenuRef}
+                  className="fixed z-50 overflow-y-auto overscroll-contain rounded-3xl border border-slate-200 bg-white text-slate-900 shadow-2xl shadow-slate-950/20"
+                  style={{
+                    top: doctorProfilePosition.top,
+                    left: doctorProfilePosition.left,
+                    width: doctorProfilePosition.width,
+                    maxHeight: doctorProfilePosition.maxHeight,
+                  }}
+                >
                   <div className="border-b border-blue-100 bg-blue-50 px-4 py-4 text-slate-900">
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-start gap-3">
                       <span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-blue-600 text-base font-black text-white shadow-sm">
                         {(currentDoctor.name?.trim().charAt(0) || 'D').toUpperCase()}
                       </span>
-                      <div className="min-w-0">
-                        <p className="truncate text-sm font-black">{currentDoctor.name}</p>
+                      <div className="min-w-0 flex-1">
+                        <p className="whitespace-normal break-words text-sm font-black">{currentDoctor.name}</p>
                         <p className="truncate text-[11px] text-slate-500">{currentDoctor.clinic_name || 'Clinic'} · Room {currentDoctor.room_number}</p>
                       </div>
                     </div>
@@ -1290,7 +1344,8 @@ export default function ReceptionDeskPage() {
                       <span>Log Out</span>
                     </button>
                   </div>
-                </div>
+                </div>,
+                document.body
               )}
             </div>
           </div>
@@ -1774,12 +1829,6 @@ export default function ReceptionDeskPage() {
               </p>
             </div>
             <div className="flex items-center justify-between gap-4 sm:justify-end">
-              <div className="text-right">
-                <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">
-                  Completed visits · {completedHistoryTickets.length}
-                </p>
-                <p className="text-xs font-bold text-slate-700">Paid total: {formatCurrency(completedHistoryPaidTotal)}</p>
-              </div>
               <button
                 type="button"
                 onClick={handleDownloadHistory}
@@ -1789,6 +1838,23 @@ export default function ReceptionDeskPage() {
                 <Download className="h-4 w-4" />
                 Download CSV
               </button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-3 border-b border-slate-200 p-4 sm:grid-cols-2">
+            <div className="rounded-2xl border border-blue-100 bg-blue-50/70 px-4 py-3">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-blue-700">Completed visits</p>
+              <p className="mt-1 text-2xl font-black tracking-tight text-slate-900">
+                {historyLoading ? '—' : completedHistoryTickets.length}
+              </p>
+              <p className="mt-0.5 text-[11px] text-slate-500">For the selected doctor and date range</p>
+            </div>
+            <div className="rounded-2xl border border-emerald-100 bg-emerald-50/70 px-4 py-3">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-emerald-700">Paid total</p>
+              <p className="mt-1 text-2xl font-black tracking-tight text-slate-900">
+                {historyLoading ? '—' : formatCurrency(completedHistoryPaidTotal)}
+              </p>
+              <p className="mt-0.5 text-[11px] text-slate-500">Collected for completed visits</p>
             </div>
           </div>
 
