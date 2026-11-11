@@ -27,6 +27,26 @@ The chime plays only on the reception device; the patient's mobile receives a si
 Background push requires HTTPS, browser notification permission, and VAPID setup.
 On iOS, the patient portal must be added to the Home Screen for Web Push support.
 
+## Platform admin workspace
+
+Apply `supabase/migrations/20261111000200_add_admin_dashboard_controls.sql` to add
+separate public-directory visibility controls and the private admin audit log. Set
+`ADMIN_EMAIL` to the email address of the one Supabase Auth account allowed into
+`/admin`. Admin API requests verify the Supabase session and this server-only
+allowlist; do not expose `SUPABASE_SERVICE_ROLE_KEY` or `ADMIN_EMAIL` as
+`NEXT_PUBLIC_` variables.
+
+The admin workspace includes platform activity counts, clinic and doctor listing
+controls, exact token lookup without patient contact details, and an audit log for
+directory changes.
+
+Select **Forgot password?** on a sign-in form to open the recovery form, enter the
+account email, and request a link. All password reset emails return to the existing
+Supabase Site URL, and the app root handles the recovery callback before the normal
+clinic redirect. Set the Supabase Site URL to the app origin (for example,
+`http://localhost:3000` for local development or your production domain). No
+additional callback redirect URLs are required for password recovery.
+
 ## Getting Started
 
 First, run the development server:

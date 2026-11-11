@@ -42,6 +42,7 @@ interface ClinicDirectoryRecord {
   booking_fee: number | string | null;
   city: string | null;
   address: string | null;
+  is_listed?: boolean | null;
 }
 
 interface DepartmentDirectoryRecord {
@@ -64,6 +65,7 @@ interface DoctorDirectoryRecord {
   opd_status?: string | null;
   broadcast_message?: string | null;
   rating?: number | null;
+  is_listed?: boolean | null;
 }
 
 interface QueueMetricTicket {
@@ -108,6 +110,7 @@ interface DoctorDirectoryItem {
   opd_status?: string;
   broadcast_message?: string | null;
   rating: number;
+  is_listed: boolean;
 }
 
 interface ConfirmedTicket {
@@ -245,6 +248,7 @@ function DoctorBookingDirectoryContent() {
   const [authReady, setAuthReady] = useState(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [authTab, setAuthTab] = useState<'login' | 'register'>('login');
+  const [showPatientResetForm, setShowPatientResetForm] = useState(false);
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
@@ -542,6 +546,23 @@ function DoctorBookingDirectoryContent() {
       setShowAuthModal(false);
     } catch (err: unknown) {
       setAuthError(getErrorMessage(err, 'Authentication failed. Please check your details.'));
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handlePatientPasswordReset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthLoading(true);
+    setAuthError('');
+    setAuthNotice('');
+
+    try {
+      const { error } = await patientSupabase.auth.resetPasswordForEmail(authEmail.trim());
+      if (error) throw error;
+      setAuthNotice('If an account exists for this email, a password reset link has been sent. Check your inbox.');
+    } catch (err: unknown) {
+      setAuthError(getErrorMessage(err, 'Unable to send a password reset email.'));
     } finally {
       setAuthLoading(false);
     }
@@ -960,6 +981,7 @@ function DoctorBookingDirectoryContent() {
             opd_status: doc.opd_status || 'ACTIVE',
             broadcast_message: doc.broadcast_message || null,
             rating: rating ? rating.total / rating.count : 3,
+            is_listed: doc.is_listed !== false && clinic?.is_listed !== false,
           };
         });
 
@@ -1252,7 +1274,7 @@ function DoctorBookingDirectoryContent() {
 
   // 3. Filter doctors by Search Query or Clinic Parameter
   const filteredDoctors = useMemo(() => {
-    let list = doctors;
+    let list = doctors.filter((doctor) => doctor.is_listed);
     if (urlClinicId) {
       list = list.filter(d => d.clinic_id === urlClinicId);
     }
@@ -2559,9 +2581,11 @@ function DoctorBookingDirectoryContent() {
             <div className="flex items-center justify-between mb-6 pb-3 border-b border-slate-100">
               <div>
                 <h3 id="patient-auth-title" className="text-lg font-black text-slate-900">
-                  {authTab === 'login' ? 'Patient Login' : 'Create Patient Account'}
+                  {showPatientResetForm ? 'Reset Patient Password' : authTab === 'login' ? 'Patient Login' : 'Create Patient Account'}
                 </h3>
-                <p className="text-xs text-slate-500">Sign in to book tokens and track live queues</p>
+                <p className="text-xs text-slate-500">
+                  {showPatientResetForm ? 'We’ll email you a secure password reset link.' : 'Sign in to book tokens and track live queues'}
+                </p>
               </div>
               <button
                 type="button"
@@ -2572,6 +2596,7 @@ function DoctorBookingDirectoryContent() {
                   setAuthPassword('');
                   setAuthError('');
                   setAuthNotice('');
+                  setShowPatientResetForm(false);
                 }}
                 className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
               >
@@ -2579,11 +2604,12 @@ function DoctorBookingDirectoryContent() {
               </button>
             </div>
 
-            <div className="grid grid-cols-2 gap-2 bg-slate-100 p-1 rounded-2xl mb-5">
+            {!showPatientResetForm && <div className="grid grid-cols-2 gap-2 bg-slate-100 p-1 rounded-2xl mb-5">
               <button
                 type="button"
                 onClick={() => {
                   setAuthTab('login');
+                  setShowPatientResetForm(false);
                   setAuthError('');
                   setAuthNotice('');
                 }}
@@ -2597,6 +2623,7 @@ function DoctorBookingDirectoryContent() {
                 type="button"
                 onClick={() => {
                   setAuthTab('register');
+                  setShowPatientResetForm(false);
                   setAuthError('');
                   setAuthNotice('');
                 }}
@@ -2606,7 +2633,7 @@ function DoctorBookingDirectoryContent() {
               >
                 New Register
               </button>
-            </div>
+            </div>}
 
             {authError && (
               <div role="alert" className="mb-4 p-3 rounded-2xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-semibold">
@@ -2619,8 +2646,8 @@ function DoctorBookingDirectoryContent() {
               </div>
             )}
 
-            <form onSubmit={handlePatientAuth} className="space-y-4">
-              {authTab === 'register' && (
+            <form onSubmit={showPatientResetForm ? handlePatientPasswordReset : handlePatientAuth} className="space-y-4">
+              {!showPatientResetForm && authTab === 'register' && (
                 <>
                   <div>
                     <label htmlFor="patient-auth-name" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
@@ -2672,7 +2699,7 @@ function DoctorBookingDirectoryContent() {
                 />
               </div>
 
-              <div>
+              {!showPatientResetForm && <div>
                 <label htmlFor="patient-auth-password" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
                   Password *
                 </label>
@@ -2686,7 +2713,7 @@ function DoctorBookingDirectoryContent() {
                   placeholder="Enter your password"
                   className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-600 focus:outline-hidden"
                 />
-              </div>
+              </div>}
 
               <button
                 type="submit"
@@ -2694,11 +2721,38 @@ function DoctorBookingDirectoryContent() {
                 className="w-full mt-2 py-3.5 rounded-xl shadow-md text-xs font-black text-white bg-blue-600 hover:bg-blue-700 active:scale-95 disabled:opacity-50 transition-all cursor-pointer"
               >
                 {authLoading
-                  ? 'Processing...'
-                  : authTab === 'login'
-                    ? 'Sign In & Continue Booking'
-                    : 'Register & Continue'}
+                  ? showPatientResetForm ? 'Sending reset link...' : 'Processing...'
+                  : showPatientResetForm
+                    ? 'Send reset link'
+                    : authTab === 'login'
+                      ? 'Sign In & Continue Booking'
+                      : 'Register & Continue'}
               </button>
+              {showPatientResetForm ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowPatientResetForm(false);
+                    setAuthError('');
+                    setAuthNotice('');
+                  }}
+                  className="w-full rounded-xl py-2 text-xs font-bold text-blue-600 hover:bg-blue-50"
+                >
+                  Back to patient login
+                </button>
+              ) : authTab === 'login' && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowPatientResetForm(true);
+                    setAuthError('');
+                    setAuthNotice('');
+                  }}
+                  className="w-full rounded-xl py-2 text-xs font-bold text-blue-600 hover:bg-blue-50"
+                >
+                  Forgot password?
+                </button>
+              )}
             </form>
           </div>
         </div>
