@@ -11,12 +11,14 @@ import {
   CheckCircle2,
   ClipboardList,
   Clock3,
+  IndianRupee,
   KeyRound,
   LayoutDashboard,
   LoaderCircle,
   LogOut,
   Search,
   ShieldCheck,
+  Save,
   Stethoscope,
   Users,
 } from 'lucide-react';
@@ -31,7 +33,7 @@ interface AdminAuditRecord {
   action: string;
   entity_type: string;
   entity_id: string | null;
-  metadata: { listed?: boolean; match_count?: number };
+  metadata: { listed?: boolean; match_count?: number; is_free?: boolean; booking_fee?: number; currency?: string };
   created_at: string;
 }
 
@@ -54,6 +56,8 @@ interface AdminClinic {
   city: string | null;
   address: string | null;
   booking_fee: number | string | null;
+  is_free: boolean;
+  currency: string;
   is_listed: boolean;
   created_at: string;
   doctors: AdminDoctor[];
@@ -78,7 +82,7 @@ interface AdminOverview {
 
 const navigation: { id: AdminView; label: string; icon: typeof LayoutDashboard }[] = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
-  { id: 'clinics', label: 'Clinics & directory', icon: Building2 },
+  { id: 'clinics', label: 'Clinics & fees', icon: Building2 },
   { id: 'tickets', label: 'Token lookup', icon: Search },
   { id: 'audit', label: 'Audit log', icon: ClipboardList },
 ];
@@ -256,6 +260,34 @@ export default function AdminPage() {
     }
   }
 
+  async function updateClinicBookingFee(id: string, isFree: boolean, bookingFee: number) {
+    if (!session) return;
+    setPendingUpdate(`fee:${id}`);
+    setErrorMessage('');
+    try {
+      const response = await fetch('/api/admin/clinics/fees', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${session.access_token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          clinic_id: id,
+          is_free: isFree,
+          booking_fee: bookingFee,
+          currency: 'INR',
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Unable to update the clinic booking fee.');
+      await loadView('clinics', session.access_token);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Unable to update the clinic booking fee.');
+    } finally {
+      setPendingUpdate('');
+    }
+  }
+
   if (loadingSession) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-slate-950 text-slate-200">
@@ -417,7 +449,7 @@ export default function AdminPage() {
                 <div>
                   <p className="text-sm font-semibold text-blue-700">Platform directory</p>
                   <h2 className="mt-1 text-2xl font-bold tracking-tight">Clinics & doctors</h2>
-                  <p className="mt-1 text-sm text-slate-500">Control public booking visibility without changing live OPD availability.</p>
+                  <p className="mt-1 text-sm text-slate-500">Set clinic-specific online booking fees and control public visibility.</p>
                 </div>
                 <label className="relative block w-full sm:max-w-xs">
                   <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
@@ -444,7 +476,7 @@ export default function AdminPage() {
                         {[clinic.city, clinic.address].filter(Boolean).join(' · ') || 'No location provided'}
                       </p>
                       <p className="mt-1 text-xs text-slate-500">
-                        {[clinic.phone, clinic.booking_fee == null ? null : `Booking fee ₹${Number(clinic.booking_fee).toLocaleString('en-IN')}`]
+                        {[clinic.phone, clinic.is_free ? 'Free booking' : `Booking fee ₹${Number(clinic.booking_fee).toLocaleString('en-IN')}`]
                           .filter(Boolean).join(' · ') || 'No phone or booking fee recorded'}
                       </p>
                       <p className="mt-1 text-xs text-slate-400">Added {formatDate(clinic.created_at)}</p>
@@ -461,6 +493,14 @@ export default function AdminPage() {
                         This clinic and its doctors are hidden from public booking.
                       </p>
                     )}
+                    <ClinicFeeEditor
+                      key={`${clinic.id}:${clinic.is_free}:${clinic.booking_fee}`}
+                      clinicId={clinic.id}
+                      isFree={clinic.is_free}
+                      bookingFee={Number(clinic.booking_fee) || 0}
+                      disabled={pendingUpdate === `fee:${clinic.id}`}
+                      onSave={(isFree, bookingFee) => void updateClinicBookingFee(clinic.id, isFree, bookingFee)}
+                    />
                     {clinic.doctors.length === 0 ? (
                       <p className="py-2 text-sm text-slate-500">No doctors are linked to this clinic.</p>
                     ) : (
@@ -601,6 +641,90 @@ function ListingButton({
   );
 }
 
+function ClinicFeeEditor({
+  clinicId,
+  isFree,
+  bookingFee,
+  disabled,
+  onSave,
+}: {
+  clinicId: string;
+  isFree: boolean;
+  bookingFee: number;
+  disabled: boolean;
+  onSave: (isFree: boolean, bookingFee: number) => void;
+}) {
+  const [selectedFree, setSelectedFree] = useState(isFree);
+  const [amount, setAmount] = useState(String(bookingFee || ''));
+
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const parsedAmount = selectedFree ? 0 : Number(amount);
+    if (!selectedFree && (!Number.isFinite(parsedAmount) || parsedAmount <= 0)) return;
+    onSave(selectedFree, parsedAmount);
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div className="space-y-2">
+          <p className="text-sm font-bold text-slate-800">Online booking fee</p>
+          <div className="flex flex-wrap gap-4">
+            <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+              <input
+                type="radio"
+                name={`fee-mode-${clinicId}`}
+                checked={selectedFree}
+                onChange={() => setSelectedFree(true)}
+                disabled={disabled}
+              />
+              Free
+            </label>
+            <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+              <input
+                type="radio"
+                name={`fee-mode-${clinicId}`}
+                checked={!selectedFree}
+                onChange={() => setSelectedFree(false)}
+                disabled={disabled}
+              />
+              Paid
+            </label>
+          </div>
+        </div>
+        {!selectedFree && (
+          <label className="block w-full sm:max-w-48">
+            <span className="mb-1 block text-xs font-semibold text-slate-500">Amount (INR)</span>
+            <span className="relative block">
+              <IndianRupee className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <input
+                type="number"
+                min="1"
+                max="99999999.99"
+                step="0.01"
+                required
+                value={amount}
+                onChange={(event) => setAmount(event.target.value)}
+                disabled={disabled}
+                className="w-full rounded-lg border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm outline-none focus:border-blue-400 disabled:opacity-60"
+              />
+            </span>
+          </label>
+        )}
+        <button
+          type="submit"
+          disabled={disabled || (!selectedFree && (!Number.isFinite(Number(amount)) || Number(amount) < 1))}
+          className="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500 disabled:cursor-wait disabled:opacity-60"
+        >
+          {disabled ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+          Save fee
+        </button>
+      </div>
+      <p className="mt-2 text-xs text-slate-500">This amount is shown to patients when they book online.</p>
+    </form>
+  );
+}
+
 function AuditRows({ records }: { records: AdminAuditRecord[] }) {
   if (!records.length) return <EmptyState message="No admin actions have been recorded yet." />;
   return (
@@ -617,6 +741,10 @@ function AuditRows({ records }: { records: AdminAuditRecord[] }) {
                 ? `Public listing ${record.metadata.listed ? 'enabled' : 'disabled'}`
                 : record.metadata?.match_count !== undefined
                   ? `Matched ${record.metadata.match_count} token${record.metadata.match_count === 1 ? '' : 's'}`
+                  : record.metadata?.is_free !== undefined
+                    ? record.metadata.is_free
+                      ? 'Online booking set to free'
+                      : `Online booking fee set to ₹${Number(record.metadata.booking_fee || 0).toLocaleString('en-IN')}`
                   : record.entity_id || 'Platform action'}
             </p>
           </div>

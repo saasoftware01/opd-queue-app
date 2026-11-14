@@ -188,3 +188,30 @@ begin
     ('Dr. James Wilson', orth_id, 'Room 401', true)
   on conflict do nothing;
 end $$;
+
+-- Clinic-level online booking fee configuration
+create table if not exists public.clinic_fee_settings (
+  id uuid primary key default gen_random_uuid(),
+  clinic_id text not null unique,
+  clinic_name text not null,
+  is_free boolean not null default true,
+  booking_fee numeric(10, 2) not null default 0.00,
+  currency text not null default 'INR',
+  updated_at timestamptz not null default timezone('utc'::text, now()),
+  constraint clinic_fee_settings_amount_check
+    check (
+      (is_free and booking_fee = 0)
+      or (not is_free and booking_fee > 0)
+    ),
+  constraint clinic_fee_settings_currency_check
+    check (currency ~ '^[A-Z]{3}$')
+);
+
+alter table public.clinic_fee_settings enable row level security;
+
+drop policy if exists "Allow public read access on clinic fee settings"
+  on public.clinic_fee_settings;
+create policy "Allow public read access on clinic fee settings"
+  on public.clinic_fee_settings for select using (true);
+
+grant select on public.clinic_fee_settings to anon, authenticated;
