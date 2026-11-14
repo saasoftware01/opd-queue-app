@@ -430,6 +430,7 @@ export default function AdminPage() {
                 <MetricCard label="Waiting today" value={overview?.waitingToday} icon={Clock3} />
                 <MetricCard label="Completed today" value={overview?.completedToday} icon={CheckCircle2} />
               </div>
+              <PlatformSettingsCard accessToken={session.access_token} />
               <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
                 <div className="mb-4 flex items-center justify-between">
                   <div>
@@ -591,6 +592,223 @@ export default function AdminPage() {
         </section>
       </div>
     </main>
+  );
+}
+
+interface PlatformSettingsData {
+  is_globally_free: boolean;
+  platform_fee: number;
+  enforce_referral_system: boolean;
+}
+
+function isPlatformSettingsData(value: unknown): value is PlatformSettingsData {
+  if (value === null || typeof value !== 'object') return false;
+  const settings = value as Record<string, unknown>;
+  return typeof settings.is_globally_free === 'boolean'
+    && typeof settings.platform_fee === 'number'
+    && Number.isFinite(settings.platform_fee)
+    && typeof settings.enforce_referral_system === 'boolean';
+}
+
+function PlatformSettingsCard({ accessToken }: { accessToken: string }) {
+  const [settings, setSettings] = useState<PlatformSettingsData | null>(null);
+  const [platformFee, setPlatformFee] = useState('');
+  const [settingsLoading, setSettingsLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [loadError, setLoadError] = useState('');
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [toast, setToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadSettings() {
+      try {
+        const response = await fetch('/api/admin/platform-settings', {
+          headers: { authorization: `Bearer ${accessToken}` },
+          cache: 'no-store',
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || 'Unable to load platform settings.');
+        if (!isPlatformSettingsData(result.data)) throw new Error('The platform settings response is invalid.');
+        if (active) {
+          setSettings(result.data);
+          setPlatformFee(String(result.data.platform_fee));
+        }
+      } catch (error) {
+        if (active) setLoadError(error instanceof Error ? error.message : 'Unable to load platform settings.');
+      } finally {
+        if (active) setSettingsLoading(false);
+      }
+    }
+
+    void loadSettings();
+    return () => { active = false; };
+  }, [accessToken, loadAttempt]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timeout = window.setTimeout(() => setToast(null), 4000);
+    return () => window.clearTimeout(timeout);
+  }, [toast]);
+
+  async function handleSave(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!settings) return;
+
+    const fee = Number(platformFee);
+    if (
+      !platformFee.trim()
+      || !Number.isFinite(fee)
+      || fee < 0
+      || fee > 99999999.99
+      || Number(fee.toFixed(2)) !== fee
+    ) {
+      setToast({ type: 'error', message: 'Enter a valid platform fee with up to two decimal places.' });
+      return;
+    }
+
+    setSaving(true);
+    setToast(null);
+    try {
+      const response = await fetch('/api/admin/platform-settings', {
+        method: 'PUT',
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          is_globally_free: settings.is_globally_free,
+          platform_fee: fee,
+          enforce_referral_system: settings.enforce_referral_system,
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Unable to save platform settings.');
+      if (!isPlatformSettingsData(result.data)) throw new Error('The saved platform settings response is invalid.');
+
+      setSettings(result.data);
+      setPlatformFee(String(result.data.platform_fee));
+      setToast({ type: 'success', message: 'Platform settings saved successfully.' });
+    } catch (error) {
+      setToast({ type: 'error', message: error instanceof Error ? error.message : 'Unable to save platform settings.' });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const fee = Number(platformFee);
+  const invalidFee = !platformFee.trim()
+    || !Number.isFinite(fee)
+    || fee < 0
+    || fee > 99999999.99
+    || Number(fee.toFixed(2)) !== fee;
+
+  return (
+    <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="mb-5">
+        <p className="text-sm font-semibold text-blue-700">Platform controls</p>
+        <h3 className="mt-1 text-lg font-bold">Global pricing & referrals</h3>
+        <p className="mt-1 text-sm text-slate-500">Manage free booking mode, the standard platform fee, and referral enforcement.</p>
+      </div>
+
+      {toast && (
+        <div
+          role={toast.type === 'error' ? 'alert' : 'status'}
+          aria-live={toast.type === 'error' ? 'assertive' : 'polite'}
+          className={`fixed right-4 top-4 z-50 rounded-xl border px-4 py-3 text-sm font-medium shadow-lg ${
+            toast.type === 'success'
+              ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+              : 'border-rose-200 bg-rose-50 text-rose-800'
+          }`}
+        >
+          {toast.message}
+        </div>
+      )}
+
+      {settingsLoading ? (
+        <p className="flex items-center gap-2 py-4 text-sm text-slate-500" role="status">
+          <LoaderCircle className="h-4 w-4 animate-spin" /> Loading platform settings…
+        </p>
+      ) : loadError ? (
+        <div>
+          <ErrorBanner message={loadError} />
+          <button
+            type="button"
+            onClick={() => {
+              setLoadError('');
+              setSettingsLoading(true);
+              setLoadAttempt((attempt) => attempt + 1);
+            }}
+            className="mt-3 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+          >
+            Try again
+          </button>
+        </div>
+      ) : settings ? (
+        <form onSubmit={handleSave} className="space-y-4">
+          <label className="flex items-center justify-between gap-4 rounded-xl border border-slate-200 p-4">
+            <span>
+              <span className="block text-sm font-semibold text-slate-800">Global Free Mode</span>
+              <span className="mt-1 block text-xs text-slate-500">Make bookings free across the platform.</span>
+            </span>
+            <input
+              type="checkbox"
+              role="switch"
+              checked={settings.is_globally_free}
+              onChange={(event) => setSettings({ ...settings, is_globally_free: event.target.checked })}
+              disabled={saving}
+              className="h-5 w-5 shrink-0 accent-blue-600"
+            />
+          </label>
+
+          <label className="block">
+            <span className="mb-1.5 block text-sm font-semibold text-slate-800">Standard Platform Fee</span>
+            <span className="relative block max-w-xs">
+              <IndianRupee className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <input
+                type="number"
+                min="0"
+                max="99999999.99"
+                step="0.01"
+                required
+                value={platformFee}
+                onChange={(event) => setPlatformFee(event.target.value)}
+                disabled={saving}
+                className="w-full rounded-lg border border-slate-200 bg-white py-2.5 pl-9 pr-3 text-sm outline-none focus:border-blue-400 disabled:opacity-60"
+              />
+            </span>
+            <span className="mt-1 block text-xs text-slate-500">Applied when global free mode is off.</span>
+          </label>
+
+          <label className="flex items-center justify-between gap-4 rounded-xl border border-slate-200 p-4">
+            <span>
+              <span className="block text-sm font-semibold text-slate-800">Referral Program Enforcement</span>
+              <span className="mt-1 block text-xs text-slate-500">Require valid referral codes at signup and enable referral rewards.</span>
+            </span>
+            <input
+              type="checkbox"
+              role="switch"
+              checked={settings.enforce_referral_system}
+              onChange={(event) => setSettings({ ...settings, enforce_referral_system: event.target.checked })}
+              disabled={saving}
+              className="h-5 w-5 shrink-0 accent-blue-600"
+            />
+          </label>
+
+          <div className="flex justify-end">
+            <button
+              type="submit"
+              disabled={saving || invalidFee}
+              className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-500 disabled:cursor-wait disabled:opacity-60"
+            >
+              {saving ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+              {saving ? 'Saving…' : 'Save platform settings'}
+            </button>
+          </div>
+        </form>
+      ) : null}
+    </section>
   );
 }
 

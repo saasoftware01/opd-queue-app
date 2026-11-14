@@ -17,6 +17,10 @@ interface RazorpayOrder {
   currency: string;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const allowedGenders = new Set(['female', 'male', 'other', 'prefer-not-to-say']);
 const weekdayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -54,13 +58,6 @@ export async function POST(request: Request) {
     return Response.json({ error: 'Valid patient and doctor details are required.' }, { status: 400 });
   }
 
-  const config = getRazorpayConfiguration();
-  if (!config) {
-    return Response.json({
-      error: 'Razorpay test mode is not configured. Add valid Razorpay test API keys to the server environment.',
-    }, { status: 503 });
-  }
-
   try {
     const { data: doctor, error: doctorError } = await auth.admin
       .from('doctors')
@@ -69,7 +66,7 @@ export async function POST(request: Request) {
       .maybeSingle();
 
     if (doctorError) {
-      console.error('Paid booking doctor lookup failed:', doctorError);
+      console.error('Online booking doctor lookup failed:', doctorError);
       return Response.json({ error: 'Unable to verify this doctor.' }, { status: 500 });
     }
     if (!doctor || !doctor.clinic_id || !doctor.department_id || doctor.is_listed === false) {
@@ -93,31 +90,11 @@ export async function POST(request: Request) {
       .maybeSingle();
 
     if (clinicError) {
-      console.error('Paid booking clinic lookup failed:', clinicError);
+      console.error('Online booking clinic lookup failed:', clinicError);
       return Response.json({ error: 'Unable to verify this clinic.' }, { status: 500 });
     }
     if (!clinic || clinic.is_listed === false) {
       return Response.json({ error: 'This clinic is not available for online booking.' }, { status: 400 });
-    }
-
-    const { data: feeSetting, error: feeError } = await auth.admin
-      .from('clinic_fee_settings')
-      .select('is_free, booking_fee, currency')
-      .eq('clinic_id', clinic.id)
-      .maybeSingle();
-
-    if (feeError) {
-      console.error('Paid booking fee lookup failed:', feeError);
-      return Response.json({ error: 'Unable to verify the clinic booking fee.' }, { status: 500 });
-    }
-    if (!feeSetting || feeSetting.is_free || feeSetting.currency !== 'INR') {
-      return Response.json({ error: 'This clinic is not configured for paid online booking.' }, { status: 409 });
-    }
-
-    const bookingFee = Number(feeSetting.booking_fee);
-    const amount = Math.round(bookingFee * 100);
-    if (!Number.isFinite(bookingFee) || bookingFee < 1 || !Number.isSafeInteger(amount)) {
-      return Response.json({ error: 'The clinic booking fee must be at least ₹1 for Razorpay.' }, { status: 409 });
     }
 
     const { start, end } = getClinicDayRange();
@@ -132,7 +109,7 @@ export async function POST(request: Request) {
       .maybeSingle();
 
     if (activeTicketError) {
-      console.error('Paid booking duplicate check failed:', activeTicketError);
+      console.error('Online booking duplicate check failed:', activeTicketError);
       return Response.json({ error: 'Unable to check for an existing booking.' }, { status: 500 });
     }
     if (existingTicket) {
@@ -141,12 +118,84 @@ export async function POST(request: Request) {
       }, { status: 409 });
     }
 
+    const { data: bookingDecision, error: bookingDecisionError } = await auth.admin.rpc(
+      'book_patient_token_or_quote_fee',
+      {
+        p_patient_user_id: auth.user.id,
+        p_clinic_id: clinic.id,
+        p_doctor_id: doctor.id,
+        p_department_id: doctor.department_id,
+        p_patient_name: patientName,
+        p_phone_number: phoneNumber,
+        p_patient_age: patient_age,
+        p_patient_gender: patient_gender,
+        p_day_start: start,
+        p_day_end: end,
+      }
+    );
+
+    if (bookingDecisionError) {
+      console.error('Patient booking fee decision failed:', bookingDecisionError);
+      if (bookingDecisionError.code === 'PGRST202' || bookingDecisionError.code === '42883') {
+        return Response.json({
+          error: 'The booking fee policy is not installed in Supabase. Apply migration 20261114000700_apply_platform_booking_fee_policy.sql.',
+        }, { status: 503 });
+      }
+      if (bookingDecisionError.code === '42804') {
+        return Response.json({
+          error: 'The booking database schema has a type mismatch. Apply migration 20261114000900_fix_platform_booking_clinic_id_type.sql.',
+        }, { status: 503 });
+      }
+      const errorCode = bookingDecisionError.code
+        ? ` (database error ${bookingDecisionError.code})`
+        : '';
+      return Response.json({
+        error: `Unable to determine the booking fee.${errorCode}`,
+      }, { status: 500 });
+    }
+    if (!isRecord(bookingDecision) || typeof bookingDecision.mode !== 'string') {
+      console.error('Patient booking fee decision returned an invalid response:', bookingDecision);
+      return Response.json({ error: 'The booking fee policy returned an invalid response.' }, { status: 500 });
+    }
+    if (bookingDecision.mode === 'duplicate') {
+      const tokenNumber = typeof bookingDecision.token_number === 'string'
+        ? bookingDecision.token_number
+        : 'unknown';
+      return Response.json({
+        error: `You already have an active token (#${tokenNumber}) for this doctor today.`,
+      }, { status: 409 });
+    }
+    if (bookingDecision.mode === 'free') {
+      if (!isRecord(bookingDecision.ticket)) {
+        console.error('Free booking response did not contain a ticket.');
+        return Response.json({ error: 'The free token could not be loaded.' }, { status: 500 });
+      }
+      return Response.json({ mode: 'free', ticket: bookingDecision.ticket });
+    }
+    if (bookingDecision.mode !== 'payment') {
+      console.error('Patient booking fee decision returned an unknown mode.');
+      return Response.json({ error: 'The booking fee policy returned an unknown decision.' }, { status: 500 });
+    }
+
+    const bookingFee = Number(bookingDecision.platform_fee);
+    const amount = Math.round(bookingFee * 100);
+    if (!Number.isFinite(bookingFee) || bookingFee < 1 || !Number.isSafeInteger(amount)) {
+      return Response.json({ error: 'The platform fee must be at least ₹1 for Razorpay.' }, { status: 409 });
+    }
+
+    const config = getRazorpayConfiguration();
+    if (!config) {
+      return Response.json({
+        error: 'Razorpay test mode is not configured. Add valid Razorpay test API keys to the server environment.',
+      }, { status: 503 });
+    }
+
     const receipt = randomUUID();
     const order = await razorpayRequest<RazorpayOrder>(config, '/orders', {
       method: 'POST',
-      body: JSON.stringify({ amount, currency: feeSetting.currency, receipt }),
+      body: JSON.stringify({ amount, currency: 'INR', receipt }),
     });
-    if (order.amount !== amount || order.currency !== feeSetting.currency || !/^order_[A-Za-z0-9]+$/.test(order.id)) {
+    if (order.amount !== amount || order.currency !== 'INR' || !/^order_[A-Za-z0-9]+$/.test(order.id)) {
       console.error('Razorpay returned an order that did not match the requested booking amount.');
       return Response.json({ error: 'Razorpay returned an invalid booking order.' }, { status: 502 });
     }
@@ -162,7 +211,7 @@ export async function POST(request: Request) {
       patient_age,
       patient_gender,
       booking_fee: bookingFee,
-      currency: feeSetting.currency,
+      currency: 'INR',
     });
 
     if (insertError) {
@@ -171,6 +220,7 @@ export async function POST(request: Request) {
     }
 
     return Response.json({
+      mode: 'payment',
       order_id: order.id,
       amount: order.amount,
       currency: order.currency,
@@ -178,7 +228,7 @@ export async function POST(request: Request) {
       clinic_name: clinic.name,
     });
   } catch (error) {
-    console.error('Razorpay order creation failed:', error);
-    return Response.json({ error: 'Unable to start the Razorpay payment. Please try again.' }, { status: 502 });
+    console.error('Online patient booking request failed:', error);
+    return Response.json({ error: 'Unable to complete the online booking. Please try again.' }, { status: 502 });
   }
 }
