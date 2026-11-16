@@ -57,7 +57,7 @@ export async function GET(request: Request) {
     }
 
     if (view === 'clinics') {
-      const [clinics, doctors, departments] = await Promise.all([
+      const [clinics, doctors, departments, feeSettings] = await Promise.all([
         auth.admin
           .from('clinics')
           .select('id, name, type, phone, city, address, booking_fee, is_listed, created_at')
@@ -67,22 +67,32 @@ export async function GET(request: Request) {
           .select('id, name, clinic_id, department_id, room_number, opd_status, is_available, is_listed, created_at')
           .order('name'),
         auth.admin.from('departments').select('id, name'),
+        auth.admin
+          .from('clinic_fee_settings')
+          .select('clinic_id, is_free, booking_fee, currency'),
       ]);
 
       const failedQuery = [
         ['Clinic list', clinics.error],
         ['Doctor list', doctors.error],
         ['Department list', departments.error],
+        ['Clinic booking fee settings', feeSettings.error],
       ].find(([, error]) => error);
 
       if (failedQuery) {
         console.error(`${failedQuery[0]} query failed:`, failedQuery[1]);
-        return Response.json({ error: 'Unable to load clinics and doctors.' }, { status: 500 });
+        return Response.json({ error: 'Unable to load clinics, doctors, and booking fee settings.' }, { status: 500 });
       }
 
       const departmentNames = new Map((departments.data || []).map((department) => [department.id, department.name]));
+      const feeSettingsByClinic = new Map((feeSettings.data || []).map((setting) => [setting.clinic_id, setting]));
       const clinicRecords = (clinics.data || []).map((clinic) => ({
         ...clinic,
+        ...(feeSettingsByClinic.get(clinic.id) || {
+          is_free: Number(clinic.booking_fee) === 0,
+          booking_fee: clinic.booking_fee ?? 0,
+          currency: 'INR',
+        }),
         doctors: (doctors.data || [])
           .filter((doctor) => doctor.clinic_id === clinic.id)
           .map((doctor) => ({

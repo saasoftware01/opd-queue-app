@@ -29,6 +29,8 @@ import {
   Compass,
   Volume2,
   Star,
+  Copy,
+  Check,
   LogOut,
   ChevronDown,
   History as HistoryIcon,
@@ -36,10 +38,13 @@ import {
   MapPin,
 } from 'lucide-react';
 
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 interface ClinicDirectoryRecord {
   id: string;
   name: string;
-  booking_fee: number | string | null;
   city: string | null;
   address: string | null;
   is_listed?: boolean | null;
@@ -103,7 +108,6 @@ interface DoctorDirectoryItem {
   clinic_name: string;
   clinic_city: string;
   clinic_address: string;
-  booking_fee: number;
   department_id: string | null;
   department_name: string;
   waiting_count?: number;
@@ -138,6 +142,88 @@ interface PatientHistoryTicket {
   doctor_id: string | null;
 }
 
+interface PatientAccountProfile {
+  referral_code: string | null;
+  free_tokens_balance: number;
+}
+
+interface RazorpayOrderResponse {
+  mode: 'payment';
+  order_id: string;
+  amount: number;
+  currency: string;
+  key_id: string;
+  clinic_name: string;
+}
+
+interface RazorpayPaymentResponse {
+  razorpay_order_id: string;
+  razorpay_payment_id: string;
+  razorpay_signature: string;
+}
+
+interface VerifiedBookingTicket {
+  id: string;
+  token_number: string;
+  patient_name: string;
+  phone_number: string | null;
+  status: string;
+  created_at: string;
+  doctor_id: string | null;
+  booking_fee_paid: number | string | null;
+}
+
+function isVerifiedBookingTicket(value: unknown): value is VerifiedBookingTicket {
+  if (!isObjectRecord(value)) return false;
+  return typeof value.id === 'string'
+    && typeof value.token_number === 'string'
+    && typeof value.patient_name === 'string'
+    && (typeof value.phone_number === 'string' || value.phone_number === null)
+    && typeof value.status === 'string'
+    && typeof value.created_at === 'string'
+    && (typeof value.doctor_id === 'string' || value.doctor_id === null)
+    && (
+      typeof value.booking_fee_paid === 'number'
+      || typeof value.booking_fee_paid === 'string'
+      || value.booking_fee_paid === null
+    );
+}
+
+function isRazorpayOrderResponse(value: unknown): value is RazorpayOrderResponse {
+  if (!isObjectRecord(value)) return false;
+  return value.mode === 'payment'
+    && typeof value.order_id === 'string'
+    && typeof value.amount === 'number'
+    && typeof value.currency === 'string'
+    && typeof value.key_id === 'string'
+    && typeof value.clinic_name === 'string';
+}
+
+interface RazorpayCheckoutOptions {
+  key: string;
+  amount: number;
+  currency: string;
+  name: string;
+  description: string;
+  order_id: string;
+  prefill: { name: string; contact: string };
+  handler: (response: RazorpayPaymentResponse) => void;
+  modal: { ondismiss: () => void };
+}
+
+interface RazorpayCheckoutInstance {
+  open: () => void;
+  on: (event: 'payment.failed', handler: (response: { error?: { description?: string } }) => void) => void;
+}
+
+type RazorpayCheckoutConstructor = new (options: RazorpayCheckoutOptions) => RazorpayCheckoutInstance;
+
+declare global {
+  interface Window {
+    Razorpay?: RazorpayCheckoutConstructor;
+  }
+}
+
 function getErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error) return error.message;
   if (typeof error === 'object' && error !== null && 'message' in error && typeof error.message === 'string') {
@@ -150,6 +236,27 @@ const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', '
 const PATIENT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const PATIENT_ACTIVITY_STORAGE_KEY = 'opd-queue-patient-last-activity';
 const PATIENT_CALL_ALERTS_STORAGE_KEY = 'opd-queue-call-alerts-enabled';
+
+function loadRazorpayCheckout(): Promise<RazorpayCheckoutConstructor> {
+  if (window.Razorpay) return Promise.resolve(window.Razorpay);
+
+  return new Promise((resolve, reject) => {
+    let script = document.querySelector<HTMLScriptElement>('script[data-razorpay-checkout]');
+    const shouldAppend = !script;
+    if (!script) {
+      script = document.createElement('script');
+      script.src = 'https://checkout.razorpay.com/v1/checkout.js';
+      script.dataset.razorpayCheckout = 'true';
+    }
+
+    script.addEventListener('load', () => {
+      if (window.Razorpay) resolve(window.Razorpay);
+      else reject(new Error('Razorpay Checkout could not be initialized.'));
+    }, { once: true });
+    script.addEventListener('error', () => reject(new Error('Unable to load Razorpay Checkout.')), { once: true });
+    if (shouldAppend) document.body.appendChild(script);
+  });
+}
 
 function getPatientCallAlertsStorageKey(userId: string): string {
   return `${PATIENT_CALL_ALERTS_STORAGE_KEY}:${userId}`;
@@ -246,24 +353,96 @@ function DoctorBookingDirectoryContent() {
   // Patient authentication
   const [currentUser, setCurrentUser] = useState<SupabaseUser | null>(null);
   const [authReady, setAuthReady] = useState(false);
+  const [patientAccountProfile, setPatientAccountProfile] = useState<PatientAccountProfile | null>(null);
+  const [patientAccountProfileLoading, setPatientAccountProfileLoading] = useState(false);
+  const [patientAccountProfileError, setPatientAccountProfileError] = useState('');
+  const [referralCopyMessage, setReferralCopyMessage] = useState('');
+  const [referralSystemEnabled, setReferralSystemEnabled] = useState<boolean | null>(null);
+  const [globalFreeModeEnabled, setGlobalFreeModeEnabled] = useState<boolean | null>(null);
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [authTab, setAuthTab] = useState<'login' | 'register'>('login');
   const [showPatientResetForm, setShowPatientResetForm] = useState(false);
+  const [authIdentifier, setAuthIdentifier] = useState('');
+  const [patientOtp, setPatientOtp] = useState('');
+  const [patientOtpSent, setPatientOtpSent] = useState(false);
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
+  const [patientReferralCode, setPatientReferralCode] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState('');
   const [authNotice, setAuthNotice] = useState('');
   const [showProfileMenu, setShowProfileMenu] = useState(false);
   const profileMenuRef = useRef<HTMLDivElement>(null);
+  const patientAccountProfileUserIdRef = useRef<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
   const [historyTickets, setHistoryTickets] = useState<PatientHistoryTicket[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState('');
   const [callAlertPreference, setCallAlertPreference] = useState<{ userId: string; enabled: boolean } | null>(null);
 
+  const patientLoginEmail = authIdentifier.trim();
+  const patientPhoneDigits = authIdentifier.replace(/\D/g, '');
+  const isPatientEmail = patientLoginEmail.includes('@');
+  const isPatientPhoneInput =
+    !isPatientEmail &&
+    patientPhoneDigits.length > 0 &&
+    /^\+?[\d\s()-]+$/.test(authIdentifier.trim());
+  const patientPhoneLengthError =
+    isPatientPhoneInput && patientPhoneDigits.length !== 10
+      ? 'Please enter 10 digit mobile number.'
+      : '';
+  const isPatientMobile =
+    /^[6-9]\d{9}$/.test(patientPhoneDigits) &&
+    /^\+?[\d\s()-]+$/.test(authIdentifier.trim());
+  const patientAuthPhone = `+91${patientPhoneDigits}`;
+
+  const fetchReferralSystemSetting = useCallback(async () => {
+    const response = await fetch('/api/platform/referral-settings', { cache: 'no-store' });
+    const result: unknown = await response.json();
+    if (!response.ok) {
+      const message = isObjectRecord(result) && typeof result.error === 'string'
+        ? result.error
+        : 'Unable to load referral settings.';
+      throw new Error(message);
+    }
+    if (
+      !isObjectRecord(result)
+      || typeof result.enforce_referral_system !== 'boolean'
+      || typeof result.is_globally_free !== 'boolean'
+    ) {
+      throw new Error('The referral settings response was invalid.');
+    }
+    return {
+      referralProgramEnabled: result.enforce_referral_system,
+      globalFreeModeEnabled: result.is_globally_free,
+    };
+  }, []);
+
+  const refreshReferralSystemSetting = useCallback(async () => {
+    try {
+      const settings = await fetchReferralSystemSetting();
+      setReferralSystemEnabled(settings.referralProgramEnabled);
+      setGlobalFreeModeEnabled(settings.globalFreeModeEnabled);
+      if (!settings.referralProgramEnabled) setPatientReferralCode('');
+      return settings;
+    } catch (error) {
+      setReferralSystemEnabled(null);
+      setGlobalFreeModeEnabled(null);
+      throw error;
+    }
+  }, [fetchReferralSystemSetting]);
+
   const applyAuthenticatedUser = useCallback((user: SupabaseUser | null) => {
+    const userId = user?.id ?? null;
+    const isDifferentUser = patientAccountProfileUserIdRef.current !== userId;
     setCurrentUser(user);
+    patientAccountProfileUserIdRef.current = userId;
+    if (isDifferentUser) {
+      setPatientAccountProfile(null);
+      setPatientAccountProfileLoading(Boolean(user));
+      setPatientAccountProfileError('');
+      setReferralCopyMessage('');
+    }
     if (!user) {
       setCallAlertPreference(null);
       setActiveTab('DIRECTORY');
@@ -287,6 +466,113 @@ function DoctorBookingDirectoryContent() {
     if (typeof userPhone === 'string') setPhone(userPhone);
     setShowAuthModal(false);
   }, []);
+
+  const fetchPatientAccountProfile = useCallback(async (userId: string) => {
+    const { data, error } = await patientSupabase
+      .from('patients')
+      .select('referral_code, free_tokens_balance')
+      .eq('id', userId)
+      .maybeSingle();
+
+    if (error) throw error;
+    if (!data) return null;
+
+    return {
+      referral_code: typeof data.referral_code === 'string' ? data.referral_code : null,
+      free_tokens_balance: typeof data.free_tokens_balance === 'number' ? data.free_tokens_balance : 0,
+    };
+  }, []);
+
+  useEffect(() => {
+    let isCurrentRequest = true;
+    fetchReferralSystemSetting()
+      .then((settings) => {
+        if (!isCurrentRequest) return;
+        setReferralSystemEnabled(settings.referralProgramEnabled);
+        setGlobalFreeModeEnabled(settings.globalFreeModeEnabled);
+        if (!settings.referralProgramEnabled) setPatientReferralCode('');
+      })
+      .catch((error: unknown) => {
+        console.error('Referral program setting lookup failed:', error);
+        if (isCurrentRequest) {
+          setReferralSystemEnabled(null);
+          setGlobalFreeModeEnabled(null);
+        }
+      });
+
+    return () => {
+      isCurrentRequest = false;
+    };
+  }, [fetchReferralSystemSetting]);
+
+  useEffect(() => {
+    if (!showProfileMenu && !showAuthModal) return;
+    let isCurrentRequest = true;
+    fetchReferralSystemSetting()
+      .then((settings) => {
+        if (!isCurrentRequest) return;
+        setReferralSystemEnabled(settings.referralProgramEnabled);
+        setGlobalFreeModeEnabled(settings.globalFreeModeEnabled);
+        if (!settings.referralProgramEnabled) setPatientReferralCode('');
+      })
+      .catch((error: unknown) => {
+        console.error('Refreshing referral program setting failed:', error);
+        if (isCurrentRequest) {
+          setReferralSystemEnabled(null);
+          setGlobalFreeModeEnabled(null);
+        }
+      });
+
+    return () => {
+      isCurrentRequest = false;
+    };
+  }, [fetchReferralSystemSetting, showAuthModal, showProfileMenu]);
+
+  useEffect(() => {
+    const userId = currentUser?.id;
+    if (!userId) return;
+
+    let isCurrentRequest = true;
+
+    fetchPatientAccountProfile(userId)
+      .then((profile) => {
+        if (!isCurrentRequest) return;
+        setPatientAccountProfile(profile);
+        if (!profile) setPatientAccountProfileError('Your patient profile is not available yet.');
+      })
+      .catch((error: unknown) => {
+        console.error('Patient account profile lookup failed:', error);
+        if (isCurrentRequest) {
+          setPatientAccountProfileError('Could not load your free tokens or referral code.');
+        }
+      })
+      .finally(() => {
+        if (isCurrentRequest) setPatientAccountProfileLoading(false);
+      });
+
+    return () => {
+      isCurrentRequest = false;
+    };
+  }, [currentUser?.id, fetchPatientAccountProfile]);
+
+  const handleCopyReferralCode = async () => {
+    const referralCode = patientAccountProfile?.referral_code;
+    if (!referralCode) return;
+
+    try {
+      await navigator.clipboard.writeText(referralCode);
+      setReferralCopyMessage('Referral code copied.');
+    } catch (error: unknown) {
+      console.error('Copying patient referral code failed:', error);
+      setReferralCopyMessage('Could not copy the code. Please copy it manually.');
+    }
+  };
+
+  useEffect(() => {
+    if (!referralCopyMessage) return;
+    const timeout = window.setTimeout(() => setReferralCopyMessage(''), 2500);
+    return () => window.clearTimeout(timeout);
+  }, [referralCopyMessage]);
 
   useEffect(() => {
     if (!showProfileMenu) return;
@@ -506,7 +792,7 @@ function DoctorBookingDirectoryContent() {
     try {
       if (authTab === 'login') {
         const { data, error } = await patientSupabase.auth.signInWithPassword({
-          email: authEmail.trim(),
+          email: authIdentifier.trim(),
           password: authPassword,
         });
         if (error) throw error;
@@ -516,14 +802,21 @@ function DoctorBookingDirectoryContent() {
         const cleanPhone = phone.trim().replace(/\D/g, '');
         if (!patientName.trim()) throw new Error('Please enter your full name.');
         if (cleanPhone.length !== 10) throw new Error('Please enter a valid 10-digit mobile number.');
+        const { referralProgramEnabled } = await refreshReferralSystemSetting();
+        const referralCode = patientReferralCode.trim().toUpperCase();
+        if (referralProgramEnabled && !referralCode) {
+          throw new Error('A valid referral code is required to create a patient account.');
+        }
 
         const { data, error } = await patientSupabase.auth.signUp({
           email: authEmail.trim(),
           password: authPassword,
           options: {
             data: {
+              account_type: 'patient',
               full_name: patientName.trim(),
               phone: cleanPhone,
+              referred_by: referralProgramEnabled ? referralCode : null,
             },
           },
         });
@@ -542,12 +835,112 @@ function DoctorBookingDirectoryContent() {
       }
 
       setAuthEmail('');
+      setAuthIdentifier('');
       setAuthPassword('');
+      setPatientReferralCode('');
+      setPatientOtp('');
+      setPatientOtpSent(false);
       setShowAuthModal(false);
     } catch (err: unknown) {
       setAuthError(getErrorMessage(err, 'Authentication failed. Please check your details.'));
     } finally {
       setAuthLoading(false);
+    }
+  };
+
+  const handlePatientSendOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthLoading(true);
+    setAuthError('');
+    setAuthNotice('');
+
+    try {
+      const response = await fetch('/api/auth/whatsapp/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phoneNumber: patientAuthPhone }),
+      });
+      const result: unknown = await response.json();
+      if (!response.ok) {
+        const message = isObjectRecord(result) && typeof result.error === 'string'
+          ? result.error
+          : 'Unable to send a WhatsApp OTP. Please try again.';
+        throw new Error(message);
+      }
+      setPatientOtpSent(true);
+    } catch (err: unknown) {
+      setAuthError(getErrorMessage(err, 'Unable to send a WhatsApp OTP. Please try again.'));
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handlePatientVerifyOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthLoading(true);
+    setAuthError('');
+    setAuthNotice('');
+
+    try {
+      const { referralProgramEnabled } = await refreshReferralSystemSetting();
+      const response = await fetch('/api/auth/whatsapp/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          phoneNumber: patientAuthPhone,
+          otpCode: patientOtp.trim(),
+          referred_by: referralProgramEnabled ? patientReferralCode.trim().toUpperCase() : '',
+        }),
+      });
+      const result: unknown = await response.json();
+      if (!response.ok) {
+        const message = isObjectRecord(result) && typeof result.error === 'string'
+          ? result.error
+          : 'Unable to verify OTP. Please try again.';
+        throw new Error(message);
+      }
+      if (
+        !isObjectRecord(result) ||
+        !isObjectRecord(result.session) ||
+        typeof result.session.access_token !== 'string' ||
+        typeof result.session.refresh_token !== 'string'
+      ) {
+        throw new Error('The login response was invalid. Please try again.');
+      }
+
+      const { data, error } = await patientSupabase.auth.setSession({
+        access_token: result.session.access_token,
+        refresh_token: result.session.refresh_token,
+      });
+      if (error) throw error;
+      if (!data.user) throw new Error('Unable to sign in. Please try again.');
+
+      applyAuthenticatedUser(data.user);
+      setAuthIdentifier('');
+      setPatientReferralCode('');
+      setPatientOtp('');
+      setPatientOtpSent(false);
+      setShowAuthModal(false);
+    } catch (err: unknown) {
+      setAuthError(getErrorMessage(err, 'Unable to verify OTP. Please try again.'));
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handlePatientFormSubmit = async (e: React.FormEvent) => {
+    if (showPatientResetForm) {
+      await handlePatientPasswordReset(e);
+    } else if (authTab === 'register') {
+      await handlePatientAuth(e);
+    } else if (patientOtpSent) {
+      await handlePatientVerifyOtp(e);
+    } else if (isPatientEmail) {
+      await handlePatientAuth(e);
+    } else if (isPatientMobile) {
+      await handlePatientSendOtp(e);
+    } else {
+      e.preventDefault();
     }
   };
 
@@ -913,7 +1306,7 @@ function DoctorBookingDirectoryContent() {
         // Safe parallel queries using allSettled so one table never breaks the others
         const [docRes, clinicsRes, deptsRes, ticketsRes, ratingsRes] = await Promise.allSettled([
           patientSupabase.from('doctors').select('*').order('created_at', { ascending: false }),
-          patientSupabase.from('clinics').select('id, name, booking_fee, city, address'),
+          patientSupabase.from('clinics').select('id, name, city, address'),
           patientSupabase.from('departments').select('id, name'),
           patientSupabase
             .from('tickets')
@@ -974,7 +1367,6 @@ function DoctorBookingDirectoryContent() {
             clinic_name: clinic?.name || doc.clinic_name || 'Care Clinic',
             clinic_city: clinic?.city?.trim() || '',
             clinic_address: clinic?.address?.trim() || '',
-            booking_fee: Number(clinic?.booking_fee) || 0,
             department_id: doc.department_id || null,
             department_name: deptName || 'General OPD',
             waiting_count: waitingCount,
@@ -1353,28 +1745,90 @@ function DoctorBookingDirectoryContent() {
         throw new Error(`You already have an active Token (#${existingTicket.token_number}) in queue today.`);
       }
 
-      const { data: ticketData, error: ticketError } = await patientSupabase
-        .from('tickets')
-        .insert([
-          {
-            clinic_id: selectedDoctor.clinic_id || null,
-            doctor_id: selectedDoctor.id,
-            department_id: selectedDoctor.department_id,
-            patient_user_id: currentUser.id,
-            token_number: 'T',
-            patient_name: patientName.trim(),
-            phone_number: cleanPhone,
-            patient_age: age,
-            patient_gender: patientGender,
-            priority: 'normal',
-            status: 'waiting',
-            notes: '[Online Self-Booked Token]',
-          },
-        ])
-        .select()
-        .single();
+      let ticketData: VerifiedBookingTicket;
+      const { data: { session }, error: sessionError } = await patientSupabase.auth.getSession();
+      if (sessionError) throw sessionError;
+      if (!session) throw new Error('Your sign-in session has expired. Please sign in again.');
 
-      if (ticketError) throw ticketError;
+      const bookingResponse = await fetch('/api/payments/razorpay/order', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${session.access_token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          doctor_id: selectedDoctor.id,
+          patient_name: patientName.trim(),
+          phone_number: cleanPhone,
+          patient_age: age,
+          patient_gender: patientGender,
+        }),
+      });
+      const bookingResult: unknown = await bookingResponse.json();
+      if (!bookingResponse.ok) {
+        const message = isObjectRecord(bookingResult) && typeof bookingResult.error === 'string'
+          ? bookingResult.error
+          : 'Unable to start the booking.';
+        throw new Error(message);
+      }
+
+      if (isObjectRecord(bookingResult) && bookingResult.mode === 'free') {
+        if (!isVerifiedBookingTicket(bookingResult.ticket)) {
+          throw new Error('The free booking response was invalid.');
+        }
+        ticketData = bookingResult.ticket;
+      } else if (isRazorpayOrderResponse(bookingResult)) {
+        const order = bookingResult;
+        const RazorpayCheckout = await loadRazorpayCheckout();
+
+        ticketData = await new Promise<VerifiedBookingTicket>((resolve, reject) => {
+          let completed = false;
+          const fail = (error: Error) => {
+            if (completed) return;
+            completed = true;
+            reject(error);
+          };
+
+          const checkout = new RazorpayCheckout({
+            key: order.key_id,
+            amount: order.amount,
+            currency: order.currency,
+            name: 'MediQueue',
+            description: `OPD token booking - ${selectedDoctor.name}`,
+            order_id: order.order_id,
+            prefill: { name: patientName.trim(), contact: `+91${cleanPhone}` },
+            handler: async (paymentResponse) => {
+              if (completed) return;
+              completed = true;
+              try {
+                const verifyResponse = await fetch('/api/payments/razorpay/verify', {
+                  method: 'POST',
+                  headers: {
+                    authorization: `Bearer ${session.access_token}`,
+                    'content-type': 'application/json',
+                  },
+                  body: JSON.stringify(paymentResponse),
+                });
+                const verifyResult = await verifyResponse.json();
+                if (!verifyResponse.ok) throw new Error(verifyResult.error || 'Payment verification failed.');
+                resolve(verifyResult.ticket as VerifiedBookingTicket);
+              } catch (error) {
+                reject(error instanceof Error ? error : new Error('Payment verification failed.'));
+              }
+            },
+            modal: {
+              ondismiss: () => fail(new Error('Payment was cancelled. No token was booked.')),
+            },
+          });
+
+          checkout.on('payment.failed', (failure) => {
+            fail(new Error(failure.error?.description || 'Payment failed. Please try again.'));
+          });
+          checkout.open();
+        });
+      } else {
+        throw new Error('The booking response was invalid.');
+      }
 
       setConfirmedTicket({
         id: ticketData.id,
@@ -1385,10 +1839,20 @@ function DoctorBookingDirectoryContent() {
         doctor_name: selectedDoctor.name,
         clinic_name: selectedDoctor.clinic_name,
         room_number: selectedDoctor.room_number,
-        booking_amount: selectedDoctor.booking_fee,
+        booking_amount: Number(ticketData.booking_fee_paid ?? 0),
         status: ticketData.status,
         doctor_id: selectedDoctor.id,
       });
+
+      void fetchPatientAccountProfile(currentUser.id)
+        .then((profile) => {
+          if (profile && patientAccountProfileUserIdRef.current === currentUser.id) {
+            setPatientAccountProfile(profile);
+          }
+        })
+        .catch((error: unknown) => {
+          console.error('Refreshing patient account profile failed:', error);
+        });
 
       setSelectedDoctor(null);
     } catch (err: unknown) {
@@ -1648,6 +2112,61 @@ function DoctorBookingDirectoryContent() {
                         <p className="mt-3 text-[10px] font-bold uppercase tracking-[0.16em] text-slate-400">Patient account</p>
                       </div>
                       <div className="space-y-1 p-2">
+                      {globalFreeModeEnabled === false && (
+                      <div className="space-y-3 rounded-2xl bg-blue-50 px-3 py-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-xs font-bold text-slate-700">Free Tokens Left</span>
+                          <span className="rounded-full bg-white px-2.5 py-1 text-xs font-black text-blue-700 shadow-sm">
+                            {patientAccountProfileLoading
+                              ? 'Loading...'
+                              : patientAccountProfile?.free_tokens_balance ?? '--'}
+                          </span>
+                        </div>
+                      </div>
+                      )}
+                      {patientAccountProfileError && (
+                        globalFreeModeEnabled === false || referralSystemEnabled
+                      ) && (
+                        <p className="px-3 py-1 text-[10px] leading-4 text-rose-600" role="status">
+                          {patientAccountProfileError}
+                        </p>
+                      )}
+                      {referralSystemEnabled && (
+                        <div className="space-y-2 rounded-2xl bg-blue-50 px-3 py-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="min-w-0">
+                              <span className="block text-[10px] font-bold uppercase tracking-wider text-slate-500">Referral Code</span>
+                              <span className="mt-1 block break-all font-mono text-sm font-black text-slate-800">
+                                {patientAccountProfileLoading
+                                  ? 'Loading...'
+                                  : patientAccountProfile?.referral_code || '--'}
+                              </span>
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => void handleCopyReferralCode()}
+                              disabled={!patientAccountProfile?.referral_code}
+                              aria-label="Copy referral code"
+                              className="inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-blue-200 bg-white px-3 py-2 text-xs font-bold text-blue-700 transition-colors hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              {referralCopyMessage === 'Referral code copied.'
+                                ? <Check className="h-3.5 w-3.5" />
+                                : <Copy className="h-3.5 w-3.5" />}
+                              {referralCopyMessage === 'Referral code copied.' ? 'Copied' : 'Copy'}
+                            </button>
+                          </div>
+                          {referralCopyMessage && (
+                            <p
+                              className={`text-[10px] leading-4 ${
+                                referralCopyMessage === 'Referral code copied.' ? 'text-emerald-700' : 'text-rose-600'
+                              }`}
+                              role="status"
+                            >
+                              {referralCopyMessage}
+                            </p>
+                          )}
+                        </div>
+                      )}
                       <button
                         type="button"
                         onClick={() => void handleOpenPatientTracker()}
@@ -2188,7 +2707,7 @@ function DoctorBookingDirectoryContent() {
                         
                         <span className="flex min-h-7 max-w-[45%] items-center gap-1 rounded-full border border-emerald-100 bg-emerald-50 px-2.5 py-1 text-[10px] font-extrabold leading-4 text-emerald-700">
                           <IndianRupee className="w-3 h-3" />
-                          <span className="truncate">{doc.booking_fee === 0 ? 'Free Booking' : `₹${doc.booking_fee} Booking`}</span>
+                          <span className="truncate">Platform fee or free token</span>
                         </span>
                       </div>
 
@@ -2444,7 +2963,7 @@ function DoctorBookingDirectoryContent() {
               </div>
 
               <div className="px-3 py-1 rounded-xl bg-emerald-50 text-emerald-700 text-xs font-black">
-                {selectedDoctor.booking_fee === 0 ? 'Free Token' : `₹${selectedDoctor.booking_fee}`}
+                Fee set at booking
               </div>
             </div>
 
@@ -2550,10 +3069,8 @@ function DoctorBookingDirectoryContent() {
                   <Ticket className="w-4 h-4" />
                   <span>
                     {submitting
-                      ? 'Assigning Token...'
-                      : selectedDoctor.booking_fee === 0
-                        ? 'Confirm Free Token'
-                        : `Pay ₹${selectedDoctor.booking_fee} & Confirm`}
+                      ? 'Processing Booking...'
+                      : 'Continue to Book'}
                   </span>
                 </button>
               </div>
@@ -2581,10 +3098,20 @@ function DoctorBookingDirectoryContent() {
             <div className="flex items-center justify-between mb-6 pb-3 border-b border-slate-100">
               <div>
                 <h3 id="patient-auth-title" className="text-lg font-black text-slate-900">
-                  {showPatientResetForm ? 'Reset Patient Password' : authTab === 'login' ? 'Patient Login' : 'Create Patient Account'}
+                  {showPatientResetForm
+                    ? 'Reset Patient Password'
+                    : patientOtpSent
+                      ? 'Verify Patient OTP'
+                      : authTab === 'login'
+                        ? 'Patient Login'
+                        : 'Create Patient Account'}
                 </h3>
                 <p className="text-xs text-slate-500">
-                  {showPatientResetForm ? 'We’ll email you a secure password reset link.' : 'Sign in to book tokens and track live queues'}
+                  {showPatientResetForm
+                    ? 'We’ll email you a secure password reset link.'
+                    : patientOtpSent
+                      ? `Enter the WhatsApp code sent to ${patientAuthPhone}.`
+                      : 'Sign in to book tokens and track live queues'}
                 </p>
               </div>
               <button
@@ -2597,6 +3124,9 @@ function DoctorBookingDirectoryContent() {
                   setAuthError('');
                   setAuthNotice('');
                   setShowPatientResetForm(false);
+                  setAuthIdentifier('');
+                  setPatientOtp('');
+                  setPatientOtpSent(false);
                 }}
                 className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
               >
@@ -2604,12 +3134,14 @@ function DoctorBookingDirectoryContent() {
               </button>
             </div>
 
-            {!showPatientResetForm && <div className="grid grid-cols-2 gap-2 bg-slate-100 p-1 rounded-2xl mb-5">
+            {!showPatientResetForm && !patientOtpSent && <div className="grid grid-cols-2 gap-2 bg-slate-100 p-1 rounded-2xl mb-5">
               <button
                 type="button"
                 onClick={() => {
                   setAuthTab('login');
                   setShowPatientResetForm(false);
+                  setPatientOtp('');
+                  setPatientOtpSent(false);
                   setAuthError('');
                   setAuthNotice('');
                 }}
@@ -2624,6 +3156,8 @@ function DoctorBookingDirectoryContent() {
                 onClick={() => {
                   setAuthTab('register');
                   setShowPatientResetForm(false);
+                  setPatientOtp('');
+                  setPatientOtpSent(false);
                   setAuthError('');
                   setAuthNotice('');
                 }}
@@ -2646,7 +3180,7 @@ function DoctorBookingDirectoryContent() {
               </div>
             )}
 
-            <form onSubmit={showPatientResetForm ? handlePatientPasswordReset : handlePatientAuth} className="space-y-4">
+            <form onSubmit={handlePatientFormSubmit} className="space-y-4">
               {!showPatientResetForm && authTab === 'register' && (
                 <>
                   <div>
@@ -2680,26 +3214,137 @@ function DoctorBookingDirectoryContent() {
                       className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-600 focus:outline-hidden"
                     />
                   </div>
+                  {referralSystemEnabled && (
+                    <div>
+                      <label htmlFor="patient-referral-code" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                        Referral Code *
+                      </label>
+                      <input
+                        id="patient-referral-code"
+                        type="text"
+                        required
+                        autoComplete="off"
+                        maxLength={10}
+                        value={patientReferralCode}
+                        onChange={(e) => setPatientReferralCode(e.target.value.replace(/[^a-zA-Z0-9]/g, '').slice(0, 10).toUpperCase())}
+                        placeholder="Enter a valid referral code"
+                        className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-600 focus:outline-hidden"
+                      />
+                    </div>
+                  )}
                 </>
               )}
 
-              <div>
-                <label htmlFor="patient-auth-email" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                  Email Address *
-                </label>
-                <input
-                  id="patient-auth-email"
-                  type="email"
-                  required
-                  autoComplete="email"
-                  value={authEmail}
-                  onChange={(e) => setAuthEmail(e.target.value)}
-                  placeholder="patient@example.com"
-                  className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-600 focus:outline-hidden"
-                />
-              </div>
+              {(showPatientResetForm || authTab === 'register') && (
+                <div>
+                  <label htmlFor="patient-auth-email" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                    Email Address *
+                  </label>
+                  <input
+                    id="patient-auth-email"
+                    type="email"
+                    required
+                    autoComplete="email"
+                    value={authEmail}
+                    onChange={(e) => setAuthEmail(e.target.value)}
+                    placeholder="patient@example.com"
+                    className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-600 focus:outline-hidden"
+                  />
+                </div>
+              )}
 
-              {!showPatientResetForm && <div>
+              {!showPatientResetForm && authTab === 'login' && !patientOtpSent && (
+                <div>
+                  <label htmlFor="patient-auth-identifier" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                    Email or Mobile Number
+                  </label>
+                  <input
+                    id="patient-auth-identifier"
+                    type="text"
+                    required
+                    autoComplete="username"
+                    inputMode={isPatientEmail ? 'email' : 'tel'}
+                    value={authIdentifier}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      if (/^[\d\s()+-]*$/.test(value)) {
+                        let digitCount = 0;
+                        setAuthIdentifier(value.replace(/\d/g, (digit) => {
+                          digitCount += 1;
+                          return digitCount <= 10 ? digit : '';
+                        }));
+                      } else {
+                        setAuthIdentifier(value);
+                      }
+                      setAuthError('');
+                      setAuthNotice('');
+                    }}
+                    placeholder="Email or 10-digit mobile number"
+                    className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-600 focus:outline-hidden"
+                  />
+                  {patientPhoneLengthError && (
+                    <p role="alert" className="mt-1.5 text-xs font-medium text-rose-600">
+                      {patientPhoneLengthError}
+                    </p>
+                  )}
+                  {!isPatientEmail && referralSystemEnabled && (
+                    <div className="mt-3">
+                      <label htmlFor="patient-login-referral-code" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                        Referral Code (Required for new accounts)
+                      </label>
+                      <input
+                        id="patient-login-referral-code"
+                        type="text"
+                        autoComplete="off"
+                        maxLength={10}
+                        value={patientReferralCode}
+                        onChange={(e) => setPatientReferralCode(e.target.value.replace(/[^a-zA-Z0-9]/g, '').slice(0, 10).toUpperCase())}
+                        placeholder="Existing patients can leave this blank"
+                        className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-600 focus:outline-hidden"
+                      />
+                      <p className="mt-1 text-[10px] text-slate-500">
+                        Existing patients can leave this blank to sign in.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {!showPatientResetForm && authTab === 'login' && patientOtpSent && (
+                <div>
+                  <label htmlFor="patient-auth-otp" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                    One-time password
+                  </label>
+                  <input
+                    id="patient-auth-otp"
+                    type="text"
+                    required
+                    autoComplete="one-time-code"
+                    inputMode="numeric"
+                    value={patientOtp}
+                    onChange={(e) => {
+                      setPatientOtp(e.target.value.replace(/\D/g, ''));
+                      setAuthError('');
+                    }}
+                    placeholder="Enter OTP"
+                    className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm tracking-[0.3em] text-slate-900 placeholder:tracking-normal focus:bg-white focus:ring-2 focus:ring-blue-600 focus:outline-hidden"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPatientOtpSent(false);
+                      setPatientOtp('');
+                      setAuthError('');
+                      setAuthNotice('');
+                    }}
+                    className="mt-2 text-xs font-semibold text-blue-600 hover:text-blue-700 hover:underline"
+                  >
+                    Change mobile number
+                  </button>
+                </div>
+              )}
+
+              {!showPatientResetForm && (authTab === 'register' || (authTab === 'login' && isPatientEmail)) && <div>
                 <label htmlFor="patient-auth-password" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
                   Password *
                 </label>
@@ -2715,19 +3360,45 @@ function DoctorBookingDirectoryContent() {
                 />
               </div>}
 
-              <button
-                type="submit"
-                disabled={authLoading}
-                className="w-full mt-2 py-3.5 rounded-xl shadow-md text-xs font-black text-white bg-blue-600 hover:bg-blue-700 active:scale-95 disabled:opacity-50 transition-all cursor-pointer"
-              >
-                {authLoading
-                  ? showPatientResetForm ? 'Sending reset link...' : 'Processing...'
-                  : showPatientResetForm
-                    ? 'Send reset link'
-                    : authTab === 'login'
-                      ? 'Sign In & Continue Booking'
-                      : 'Register & Continue'}
-              </button>
+              {showPatientResetForm || authTab === 'register' ? (
+                <button
+                  type="submit"
+                  disabled={authLoading}
+                  className="w-full mt-2 py-3.5 rounded-xl shadow-md text-xs font-black text-white bg-blue-600 hover:bg-blue-700 active:scale-95 disabled:opacity-50 transition-all cursor-pointer"
+                >
+                  {authLoading
+                    ? showPatientResetForm ? 'Sending reset link...' : 'Processing...'
+                    : showPatientResetForm ? 'Send reset link' : 'Register & Continue'}
+                </button>
+              ) : patientOtpSent ? (
+                <button
+                  type="submit"
+                  disabled={authLoading || !patientOtp}
+                  className="w-full mt-2 py-3.5 rounded-xl shadow-md text-xs font-black text-white bg-blue-600 hover:bg-blue-700 active:scale-95 disabled:opacity-50 transition-all cursor-pointer"
+                >
+                  {authLoading ? 'Verifying...' : 'Verify OTP'}
+                </button>
+              ) : isPatientEmail ? (
+                <button
+                  type="submit"
+                  disabled={authLoading}
+                  className="w-full mt-2 py-3.5 rounded-xl shadow-md text-xs font-black text-white bg-blue-600 hover:bg-blue-700 active:scale-95 disabled:opacity-50 transition-all cursor-pointer"
+                >
+                  {authLoading ? 'Signing in...' : 'Login with Password'}
+                </button>
+              ) : isPatientMobile ? (
+                <button
+                  type="submit"
+                  disabled={authLoading}
+                  className="w-full mt-2 py-3.5 rounded-xl shadow-md text-xs font-black text-white bg-blue-600 hover:bg-blue-700 active:scale-95 disabled:opacity-50 transition-all cursor-pointer"
+                >
+                  {authLoading ? 'Sending OTP...' : 'Send WhatsApp OTP'}
+                </button>
+              ) : (
+                <p className="text-center text-xs text-slate-500">
+                  Enter your email or a 10-digit Indian mobile number.
+                </p>
+              )}
               {showPatientResetForm ? (
                 <button
                   type="button"
@@ -2740,10 +3411,11 @@ function DoctorBookingDirectoryContent() {
                 >
                   Back to patient login
                 </button>
-              ) : authTab === 'login' && (
+              ) : authTab === 'login' && isPatientEmail && !patientOtpSent && (
                 <button
                   type="button"
                   onClick={() => {
+                    setAuthEmail(authIdentifier.trim());
                     setShowPatientResetForm(true);
                     setAuthError('');
                     setAuthNotice('');

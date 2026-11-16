@@ -37,8 +37,28 @@ allowlist; do not expose `SUPABASE_SERVICE_ROLE_KEY` or `ADMIN_EMAIL` as
 `NEXT_PUBLIC_` variables.
 
 The admin workspace includes platform activity counts, clinic and doctor listing
-controls, exact token lookup without patient contact details, and an audit log for
-directory changes.
+controls, per-clinic booking fee controls, exact token lookup without patient contact
+details, and an audit log for directory changes.
+
+## Razorpay online booking payments
+
+Apply `supabase/migrations/20261114000400_add_razorpay_booking_payments.sql` after
+the clinic fee settings migration. Add Razorpay **Test Mode** credentials to `.env.local`
+using `RAZORPAY_MODE=test`, `RAZORPAY_KEY_ID`, and `RAZORPAY_KEY_SECRET`; keep the
+secret server-only and restart the app. Do not use live keys for testing.
+
+Set a clinic's booking fee to at least ₹1 from `/admin`, sign in as a patient, and
+book a token to open Razorpay Checkout. Use the test payment methods in the
+[Razorpay integration guide](https://razorpay.com/docs/payments/payment-gateway/web-integration/standard/integration-steps/).
+UPI Collect (manually entering a UPI ID) is deprecated for most web payments;
+UPI Intent is used on mobile web, while desktop Checkout displays a UPI QR code.
+The server creates the order, verifies the returned signature and captured amount,
+and only then creates the paid booking token.
+
+For payment confirmation if the patient closes Checkout after paying, configure the
+Razorpay webhook URL as `/api/payments/razorpay/webhook`, subscribe to
+`payment.captured`, and set the matching signing secret as `RAZORPAY_WEBHOOK_SECRET`.
+Use an HTTPS public URL (or a secure tunnel during local development).
 
 Select **Forgot password?** on a sign-in form to open the recovery form, enter the
 account email, and request a link. All password reset emails return to the existing

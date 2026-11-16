@@ -1,0 +1,84 @@
+create or replace function public.create_patient_profile_for_auth_user()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_phone_digits text;
+  v_phone_suffix text;
+  v_referral_code text;
+  v_requested_referral text;
+  v_referrer_id uuid;
+  v_referrer_code text;
+begin
+  if new.raw_user_meta_data ->> 'account_type' is distinct from 'patient' then
+    return new;
+  end if;
+
+  v_phone_digits := pg_catalog.regexp_replace(
+    coalesce(new.phone, new.raw_user_meta_data ->> 'phone', ''),
+    '[^0-9]',
+    '',
+    'g'
+  );
+  v_phone_suffix := pg_catalog.right('0000' || v_phone_digits, 4);
+  v_requested_referral := nullif(
+    pg_catalog.upper(pg_catalog.btrim(coalesce(new.raw_user_meta_data ->> 'referred_by', ''))),
+    ''
+  );
+
+  if v_requested_referral is not null then
+    select patient.id, patient.referral_code
+      into v_referrer_id, v_referrer_code
+      from public.patients as patient
+      where patient.id <> new.id
+        and pg_catalog.upper(patient.referral_code) = v_requested_referral
+      order by patient.id
+      limit 1
+      for update;
+  end if;
+
+  loop
+    v_referral_code := v_phone_suffix || pg_catalog.upper(
+      pg_catalog.substr(
+        pg_catalog.replace(pg_catalog.gen_random_uuid()::text, '-', ''),
+        1,
+        6
+      )
+    );
+
+    insert into public.patients (
+      id,
+      referral_code,
+      referred_by,
+      free_tokens_balance
+    )
+    values (
+      new.id,
+      v_referral_code,
+      v_referrer_code,
+      case when v_referrer_id is null then 2 else 4 end
+    )
+    on conflict (referral_code) do nothing;
+
+    exit when found;
+  end loop;
+
+  if v_referrer_id is not null then
+    update public.patients as patient
+    set free_tokens_balance = patient.free_tokens_balance + 2
+    where patient.id = v_referrer_id;
+  end if;
+
+  return new;
+end;
+$$;
+
+revoke all on function public.create_patient_profile_for_auth_user()
+  from public, anon, authenticated;
+
+drop trigger if exists create_patient_profile_for_auth_user_trigger on auth.users;
+create trigger create_patient_profile_for_auth_user_trigger
+after insert on auth.users
+for each row execute function public.create_patient_profile_for_auth_user();

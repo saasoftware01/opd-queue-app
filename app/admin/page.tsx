@@ -11,12 +11,14 @@ import {
   CheckCircle2,
   ClipboardList,
   Clock3,
+  IndianRupee,
   KeyRound,
   LayoutDashboard,
   LoaderCircle,
   LogOut,
   Search,
   ShieldCheck,
+  Save,
   Stethoscope,
   Users,
 } from 'lucide-react';
@@ -31,7 +33,7 @@ interface AdminAuditRecord {
   action: string;
   entity_type: string;
   entity_id: string | null;
-  metadata: { listed?: boolean; match_count?: number };
+  metadata: { listed?: boolean; match_count?: number; is_free?: boolean; booking_fee?: number; currency?: string };
   created_at: string;
 }
 
@@ -54,6 +56,8 @@ interface AdminClinic {
   city: string | null;
   address: string | null;
   booking_fee: number | string | null;
+  is_free: boolean;
+  currency: string;
   is_listed: boolean;
   created_at: string;
   doctors: AdminDoctor[];
@@ -78,7 +82,7 @@ interface AdminOverview {
 
 const navigation: { id: AdminView; label: string; icon: typeof LayoutDashboard }[] = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
-  { id: 'clinics', label: 'Clinics & directory', icon: Building2 },
+  { id: 'clinics', label: 'Clinics & fees', icon: Building2 },
   { id: 'tickets', label: 'Token lookup', icon: Search },
   { id: 'audit', label: 'Audit log', icon: ClipboardList },
 ];
@@ -256,6 +260,34 @@ export default function AdminPage() {
     }
   }
 
+  async function updateClinicBookingFee(id: string, isFree: boolean, bookingFee: number) {
+    if (!session) return;
+    setPendingUpdate(`fee:${id}`);
+    setErrorMessage('');
+    try {
+      const response = await fetch('/api/admin/clinics/fees', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${session.access_token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          clinic_id: id,
+          is_free: isFree,
+          booking_fee: bookingFee,
+          currency: 'INR',
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Unable to update the clinic booking fee.');
+      await loadView('clinics', session.access_token);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Unable to update the clinic booking fee.');
+    } finally {
+      setPendingUpdate('');
+    }
+  }
+
   if (loadingSession) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-slate-950 text-slate-200">
@@ -398,6 +430,7 @@ export default function AdminPage() {
                 <MetricCard label="Waiting today" value={overview?.waitingToday} icon={Clock3} />
                 <MetricCard label="Completed today" value={overview?.completedToday} icon={CheckCircle2} />
               </div>
+              <PlatformSettingsCard accessToken={session.access_token} />
               <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
                 <div className="mb-4 flex items-center justify-between">
                   <div>
@@ -417,7 +450,7 @@ export default function AdminPage() {
                 <div>
                   <p className="text-sm font-semibold text-blue-700">Platform directory</p>
                   <h2 className="mt-1 text-2xl font-bold tracking-tight">Clinics & doctors</h2>
-                  <p className="mt-1 text-sm text-slate-500">Control public booking visibility without changing live OPD availability.</p>
+                  <p className="mt-1 text-sm text-slate-500">Set clinic-specific online booking fees and control public visibility.</p>
                 </div>
                 <label className="relative block w-full sm:max-w-xs">
                   <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
@@ -444,7 +477,7 @@ export default function AdminPage() {
                         {[clinic.city, clinic.address].filter(Boolean).join(' · ') || 'No location provided'}
                       </p>
                       <p className="mt-1 text-xs text-slate-500">
-                        {[clinic.phone, clinic.booking_fee == null ? null : `Booking fee ₹${Number(clinic.booking_fee).toLocaleString('en-IN')}`]
+                        {[clinic.phone, clinic.is_free ? 'Free booking' : `Booking fee ₹${Number(clinic.booking_fee).toLocaleString('en-IN')}`]
                           .filter(Boolean).join(' · ') || 'No phone or booking fee recorded'}
                       </p>
                       <p className="mt-1 text-xs text-slate-400">Added {formatDate(clinic.created_at)}</p>
@@ -461,6 +494,14 @@ export default function AdminPage() {
                         This clinic and its doctors are hidden from public booking.
                       </p>
                     )}
+                    <ClinicFeeEditor
+                      key={`${clinic.id}:${clinic.is_free}:${clinic.booking_fee}`}
+                      clinicId={clinic.id}
+                      isFree={clinic.is_free}
+                      bookingFee={Number(clinic.booking_fee) || 0}
+                      disabled={pendingUpdate === `fee:${clinic.id}`}
+                      onSave={(isFree, bookingFee) => void updateClinicBookingFee(clinic.id, isFree, bookingFee)}
+                    />
                     {clinic.doctors.length === 0 ? (
                       <p className="py-2 text-sm text-slate-500">No doctors are linked to this clinic.</p>
                     ) : (
@@ -554,6 +595,223 @@ export default function AdminPage() {
   );
 }
 
+interface PlatformSettingsData {
+  is_globally_free: boolean;
+  platform_fee: number;
+  enforce_referral_system: boolean;
+}
+
+function isPlatformSettingsData(value: unknown): value is PlatformSettingsData {
+  if (value === null || typeof value !== 'object') return false;
+  const settings = value as Record<string, unknown>;
+  return typeof settings.is_globally_free === 'boolean'
+    && typeof settings.platform_fee === 'number'
+    && Number.isFinite(settings.platform_fee)
+    && typeof settings.enforce_referral_system === 'boolean';
+}
+
+function PlatformSettingsCard({ accessToken }: { accessToken: string }) {
+  const [settings, setSettings] = useState<PlatformSettingsData | null>(null);
+  const [platformFee, setPlatformFee] = useState('');
+  const [settingsLoading, setSettingsLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [loadError, setLoadError] = useState('');
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [toast, setToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadSettings() {
+      try {
+        const response = await fetch('/api/admin/platform-settings', {
+          headers: { authorization: `Bearer ${accessToken}` },
+          cache: 'no-store',
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || 'Unable to load platform settings.');
+        if (!isPlatformSettingsData(result.data)) throw new Error('The platform settings response is invalid.');
+        if (active) {
+          setSettings(result.data);
+          setPlatformFee(String(result.data.platform_fee));
+        }
+      } catch (error) {
+        if (active) setLoadError(error instanceof Error ? error.message : 'Unable to load platform settings.');
+      } finally {
+        if (active) setSettingsLoading(false);
+      }
+    }
+
+    void loadSettings();
+    return () => { active = false; };
+  }, [accessToken, loadAttempt]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timeout = window.setTimeout(() => setToast(null), 4000);
+    return () => window.clearTimeout(timeout);
+  }, [toast]);
+
+  async function handleSave(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!settings) return;
+
+    const fee = Number(platformFee);
+    if (
+      !platformFee.trim()
+      || !Number.isFinite(fee)
+      || fee < 0
+      || fee > 99999999.99
+      || Number(fee.toFixed(2)) !== fee
+    ) {
+      setToast({ type: 'error', message: 'Enter a valid platform fee with up to two decimal places.' });
+      return;
+    }
+
+    setSaving(true);
+    setToast(null);
+    try {
+      const response = await fetch('/api/admin/platform-settings', {
+        method: 'PUT',
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          is_globally_free: settings.is_globally_free,
+          platform_fee: fee,
+          enforce_referral_system: settings.enforce_referral_system,
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Unable to save platform settings.');
+      if (!isPlatformSettingsData(result.data)) throw new Error('The saved platform settings response is invalid.');
+
+      setSettings(result.data);
+      setPlatformFee(String(result.data.platform_fee));
+      setToast({ type: 'success', message: 'Platform settings saved successfully.' });
+    } catch (error) {
+      setToast({ type: 'error', message: error instanceof Error ? error.message : 'Unable to save platform settings.' });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const fee = Number(platformFee);
+  const invalidFee = !platformFee.trim()
+    || !Number.isFinite(fee)
+    || fee < 0
+    || fee > 99999999.99
+    || Number(fee.toFixed(2)) !== fee;
+
+  return (
+    <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="mb-5">
+        <p className="text-sm font-semibold text-blue-700">Platform controls</p>
+        <h3 className="mt-1 text-lg font-bold">Global pricing & referrals</h3>
+        <p className="mt-1 text-sm text-slate-500">Manage free booking mode, the standard platform fee, and referral enforcement.</p>
+      </div>
+
+      {toast && (
+        <div
+          role={toast.type === 'error' ? 'alert' : 'status'}
+          aria-live={toast.type === 'error' ? 'assertive' : 'polite'}
+          className={`fixed right-4 top-4 z-50 rounded-xl border px-4 py-3 text-sm font-medium shadow-lg ${
+            toast.type === 'success'
+              ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+              : 'border-rose-200 bg-rose-50 text-rose-800'
+          }`}
+        >
+          {toast.message}
+        </div>
+      )}
+
+      {settingsLoading ? (
+        <p className="flex items-center gap-2 py-4 text-sm text-slate-500" role="status">
+          <LoaderCircle className="h-4 w-4 animate-spin" /> Loading platform settings…
+        </p>
+      ) : loadError ? (
+        <div>
+          <ErrorBanner message={loadError} />
+          <button
+            type="button"
+            onClick={() => {
+              setLoadError('');
+              setSettingsLoading(true);
+              setLoadAttempt((attempt) => attempt + 1);
+            }}
+            className="mt-3 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+          >
+            Try again
+          </button>
+        </div>
+      ) : settings ? (
+        <form onSubmit={handleSave} className="space-y-4">
+          <label className="flex items-center justify-between gap-4 rounded-xl border border-slate-200 p-4">
+            <span>
+              <span className="block text-sm font-semibold text-slate-800">Global Free Mode</span>
+              <span className="mt-1 block text-xs text-slate-500">Make bookings free across the platform.</span>
+            </span>
+            <input
+              type="checkbox"
+              role="switch"
+              checked={settings.is_globally_free}
+              onChange={(event) => setSettings({ ...settings, is_globally_free: event.target.checked })}
+              disabled={saving}
+              className="h-5 w-5 shrink-0 accent-blue-600"
+            />
+          </label>
+
+          <label className="block">
+            <span className="mb-1.5 block text-sm font-semibold text-slate-800">Standard Platform Fee</span>
+            <span className="relative block max-w-xs">
+              <IndianRupee className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <input
+                type="number"
+                min="0"
+                max="99999999.99"
+                step="0.01"
+                required
+                value={platformFee}
+                onChange={(event) => setPlatformFee(event.target.value)}
+                disabled={saving}
+                className="w-full rounded-lg border border-slate-200 bg-white py-2.5 pl-9 pr-3 text-sm outline-none focus:border-blue-400 disabled:opacity-60"
+              />
+            </span>
+            <span className="mt-1 block text-xs text-slate-500">Applied when global free mode is off.</span>
+          </label>
+
+          <label className="flex items-center justify-between gap-4 rounded-xl border border-slate-200 p-4">
+            <span>
+              <span className="block text-sm font-semibold text-slate-800">Referral Program Enforcement</span>
+              <span className="mt-1 block text-xs text-slate-500">Require valid referral codes at signup and enable referral rewards.</span>
+            </span>
+            <input
+              type="checkbox"
+              role="switch"
+              checked={settings.enforce_referral_system}
+              onChange={(event) => setSettings({ ...settings, enforce_referral_system: event.target.checked })}
+              disabled={saving}
+              className="h-5 w-5 shrink-0 accent-blue-600"
+            />
+          </label>
+
+          <div className="flex justify-end">
+            <button
+              type="submit"
+              disabled={saving || invalidFee}
+              className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-500 disabled:cursor-wait disabled:opacity-60"
+            >
+              {saving ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+              {saving ? 'Saving…' : 'Save platform settings'}
+            </button>
+          </div>
+        </form>
+      ) : null}
+    </section>
+  );
+}
+
 function MetricCard({
   label,
   value,
@@ -601,6 +859,90 @@ function ListingButton({
   );
 }
 
+function ClinicFeeEditor({
+  clinicId,
+  isFree,
+  bookingFee,
+  disabled,
+  onSave,
+}: {
+  clinicId: string;
+  isFree: boolean;
+  bookingFee: number;
+  disabled: boolean;
+  onSave: (isFree: boolean, bookingFee: number) => void;
+}) {
+  const [selectedFree, setSelectedFree] = useState(isFree);
+  const [amount, setAmount] = useState(String(bookingFee || ''));
+
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const parsedAmount = selectedFree ? 0 : Number(amount);
+    if (!selectedFree && (!Number.isFinite(parsedAmount) || parsedAmount <= 0)) return;
+    onSave(selectedFree, parsedAmount);
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div className="space-y-2">
+          <p className="text-sm font-bold text-slate-800">Online booking fee</p>
+          <div className="flex flex-wrap gap-4">
+            <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+              <input
+                type="radio"
+                name={`fee-mode-${clinicId}`}
+                checked={selectedFree}
+                onChange={() => setSelectedFree(true)}
+                disabled={disabled}
+              />
+              Free
+            </label>
+            <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+              <input
+                type="radio"
+                name={`fee-mode-${clinicId}`}
+                checked={!selectedFree}
+                onChange={() => setSelectedFree(false)}
+                disabled={disabled}
+              />
+              Paid
+            </label>
+          </div>
+        </div>
+        {!selectedFree && (
+          <label className="block w-full sm:max-w-48">
+            <span className="mb-1 block text-xs font-semibold text-slate-500">Amount (INR)</span>
+            <span className="relative block">
+              <IndianRupee className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <input
+                type="number"
+                min="1"
+                max="99999999.99"
+                step="0.01"
+                required
+                value={amount}
+                onChange={(event) => setAmount(event.target.value)}
+                disabled={disabled}
+                className="w-full rounded-lg border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm outline-none focus:border-blue-400 disabled:opacity-60"
+              />
+            </span>
+          </label>
+        )}
+        <button
+          type="submit"
+          disabled={disabled || (!selectedFree && (!Number.isFinite(Number(amount)) || Number(amount) < 1))}
+          className="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500 disabled:cursor-wait disabled:opacity-60"
+        >
+          {disabled ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+          Save fee
+        </button>
+      </div>
+      <p className="mt-2 text-xs text-slate-500">This amount is shown to patients when they book online.</p>
+    </form>
+  );
+}
+
 function AuditRows({ records }: { records: AdminAuditRecord[] }) {
   if (!records.length) return <EmptyState message="No admin actions have been recorded yet." />;
   return (
@@ -617,6 +959,10 @@ function AuditRows({ records }: { records: AdminAuditRecord[] }) {
                 ? `Public listing ${record.metadata.listed ? 'enabled' : 'disabled'}`
                 : record.metadata?.match_count !== undefined
                   ? `Matched ${record.metadata.match_count} token${record.metadata.match_count === 1 ? '' : 's'}`
+                  : record.metadata?.is_free !== undefined
+                    ? record.metadata.is_free
+                      ? 'Online booking set to free'
+                      : `Online booking fee set to ₹${Number(record.metadata.booking_fee || 0).toLocaleString('en-IN')}`
                   : record.entity_id || 'Platform action'}
             </p>
           </div>

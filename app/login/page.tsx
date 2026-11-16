@@ -16,16 +16,88 @@ import {
   Clock, 
   CheckCircle2,
   Lock,
-  Mail
+  Mail,
 } from 'lucide-react';
 
 export default function LoginPage() {
   const router = useRouter();
-  const [email, setEmail] = useState('');
+  const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
+  const [otp, setOtp] = useState('');
+  const [otpSent, setOtpSent] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+
+  const email = identifier.trim();
+  const phoneDigits = identifier.replace(/\D/g, '');
+  const isEmail = email.includes('@');
+  const isPhoneInput =
+    !isEmail &&
+    phoneDigits.length > 0 &&
+    /^\+?[\d\s()-]+$/.test(identifier.trim());
+  const phoneLengthError =
+    isPhoneInput && phoneDigits.length !== 10
+      ? 'Please enter 10 digit mobile number.'
+      : '';
+  const isMobile =
+    /^[6-9]\d{9}$/.test(phoneDigits) &&
+    /^\+?[\d\s()-]+$/.test(identifier.trim());
+  const phone = `+91${phoneDigits}`;
+
+  const completeLogin = async (userId: string, userEmail: string) => {
+    // Fetch the clinic associated with this owner.
+    const { data: clinic, error: clinicError } = await supabase
+      .from('clinics')
+      .select('id, name, type')
+      .eq('owner_id', userId)
+      .maybeSingle();
+
+    if (clinicError) throw clinicError;
+    if (!clinic) {
+      throw new Error('No clinic is associated with this account. Register a clinic or contact support.');
+    }
+
+    let targetDoctorId: string | null = null;
+
+    // First priority: Doctor already linked to this clinic.
+    const { data: docLinked } = await supabase
+      .from('doctors')
+      .select('id, name')
+      .eq('clinic_id', clinic.id)
+      .maybeSingle();
+
+    if (docLinked) {
+      targetDoctorId = docLinked.id;
+    } else if (userEmail) {
+      const searchKeyword = userEmail.includes('aafaque')
+        ? 'Aafaque'
+        : userEmail.split('@')[0];
+
+      const { data: matchedDoc } = await supabase
+        .from('doctors')
+        .select('id, name')
+        .is('clinic_id', null)
+        .ilike('name', `%${searchKeyword}%`)
+        .maybeSingle();
+
+      if (matchedDoc) {
+        targetDoctorId = matchedDoc.id;
+        // Auto-heal the link in the database so this link stays permanent.
+        await supabase
+          .from('doctors')
+          .update({ clinic_id: clinic.id })
+          .eq('id', matchedDoc.id);
+      }
+    }
+
+    if (targetDoctorId) {
+      router.push(`/reception?doctor_id=${targetDoctorId}`);
+      return;
+    }
+
+    router.push('/reception');
+  };
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -33,7 +105,6 @@ export default function LoginPage() {
     setErrorMsg('');
 
     try {
-      // 1. Sign In via Supabase Auth
       const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
         email: email.trim(),
         password: password,
@@ -42,64 +113,7 @@ export default function LoginPage() {
       if (authError) throw authError;
       if (!authData.user) throw new Error('User not found.');
 
-      const userEmail = authData.user.email?.toLowerCase() || '';
-
-      // 2. Fetch Clinic associated with this owner
-      const { data: clinic, error: clinicError } = await supabase
-        .from('clinics')
-        .select('id, name, type')
-        .eq('owner_id', authData.user.id)
-        .maybeSingle();
-
-      if (clinicError) throw clinicError;
-      if (!clinic) {
-        throw new Error('No clinic is associated with this account. Register a clinic or contact support.');
-      }
-
-      let targetDoctorId: string | null = null;
-
-      // 3. Resolve the target doctor for this clinic owner
-      // First priority: Doctor already linked to this clinic
-      const { data: docLinked } = await supabase
-        .from('doctors')
-        .select('id, name')
-        .eq('clinic_id', clinic.id)
-        .maybeSingle();
-
-      if (docLinked) {
-        targetDoctorId = docLinked.id;
-      } else {
-        // If not linked yet, match by doctor name corresponding to email
-        const searchKeyword = userEmail.includes('aafaque')
-          ? 'Aafaque'
-          : userEmail.split('@')[0];
-
-        const { data: matchedDoc } = await supabase
-          .from('doctors')
-          .select('id, name')
-          .is('clinic_id', null)
-          .ilike('name', `%${searchKeyword}%`)
-          .maybeSingle();
-
-        if (matchedDoc) {
-          targetDoctorId = matchedDoc.id;
-          // Auto-heal the link in the database so this link stays permanent
-          await supabase
-            .from('doctors')
-            .update({ clinic_id: clinic.id })
-            .eq('id', matchedDoc.id);
-        }
-      }
-
-      // If doctor resolved, route directly to their reception desk
-      if (targetDoctorId) {
-        router.push(`/reception?doctor_id=${targetDoctorId}`);
-        return;
-      }
-
-      // Fallback: Default reception desk
-      router.push('/reception');
-
+      await completeLogin(authData.user.id, authData.user.email?.toLowerCase() || '');
     } catch (err: unknown) {
       console.error('Login error:', err);
       const message = getErrorMessage(err, 'Failed to authenticate. Please try again.');
@@ -110,6 +124,63 @@ export default function LoginPage() {
       );
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleSendOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setErrorMsg('');
+
+    try {
+      const { error } = await supabase.auth.signInWithOtp({
+        phone,
+        options: { channel: 'whatsapp', shouldCreateUser: false },
+      });
+
+      if (error) throw error;
+      setOtpSent(true);
+    } catch (err: unknown) {
+      console.error('WhatsApp OTP error:', err);
+      setErrorMsg(getErrorMessage(err, 'Failed to send WhatsApp OTP. Please try again.'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleVerifyOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setErrorMsg('');
+
+    try {
+      const { data, error } = await supabase.auth.verifyOtp({
+        phone,
+        token: otp.trim(),
+        type: 'sms',
+      });
+
+      if (error) throw error;
+      if (!data.user) throw new Error('User not found.');
+
+      await completeLogin(data.user.id, data.user.email?.toLowerCase() || '');
+    } catch (err: unknown) {
+      console.error('OTP verification error:', err);
+      setErrorMsg(getErrorMessage(err, 'Failed to verify OTP. Please try again.'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleFormSubmit = async (e: React.FormEvent) => {
+    if (otpSent) {
+      await handleVerifyOtp(e);
+    } else if (isEmail) {
+      await handleLogin(e);
+    } else if (isMobile) {
+      await handleSendOtp(e);
+    } else {
+      e.preventDefault();
     }
   };
 
@@ -230,79 +301,165 @@ export default function LoginPage() {
               </div>
             )}
 
-            <form onSubmit={handleLogin} className="space-y-5">
-              
-              {/* Email Input Field */}
-              <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-                  Email Address
-                </label>
-                <div className="relative">
-                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
-                    <Mail className="w-4 h-4" />
+            <form onSubmit={handleFormSubmit} className="space-y-5">
+              {!otpSent ? (
+                <>
+                  <div>
+                    <label
+                      htmlFor="login-identifier"
+                      className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5"
+                    >
+                      Email or Mobile Number
+                    </label>
+                    <div className="relative">
+                      <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                        {isMobile ? <Smartphone className="w-4 h-4" /> : <Mail className="w-4 h-4" />}
+                      </div>
+                      <input
+                        id="login-identifier"
+                        type="text"
+                        required
+                        autoComplete="username"
+                        inputMode={isEmail ? 'email' : 'tel'}
+                        value={identifier}
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          if (/^[\d\s()+-]*$/.test(value)) {
+                            let digitCount = 0;
+                            setIdentifier(value.replace(/\d/g, (digit) => {
+                              digitCount += 1;
+                              return digitCount <= 10 ? digit : '';
+                            }));
+                          } else {
+                            setIdentifier(value);
+                          }
+                          if (errorMsg) setErrorMsg('');
+                        }}
+                        placeholder="Email or 10-digit mobile number"
+                        className="w-full bg-slate-50 border border-slate-300 rounded-xl pl-10 pr-4 py-3 text-sm text-slate-900 placeholder-slate-400 focus:bg-white focus:ring-2 focus:ring-blue-600 focus:border-transparent focus:outline-hidden transition-all"
+                      />
+                    </div>
+                    {phoneLengthError && (
+                      <p role="alert" className="mt-1.5 text-xs font-medium text-rose-600">
+                        {phoneLengthError}
+                      </p>
+                    )}
                   </div>
-                  <input
-                    type="email"
-                    required
-                    value={email}
-                    onChange={(e) => {
-                      setEmail(e.target.value);
-                      if (errorMsg) setErrorMsg('');
-                    }}
-                    placeholder="doctor@clinic.com"
-                    className="w-full bg-slate-50 border border-slate-300 rounded-xl pl-10 pr-4 py-3 text-sm text-slate-900 placeholder-slate-400 focus:bg-white focus:ring-2 focus:ring-blue-600 focus:border-transparent focus:outline-hidden transition-all"
-                  />
-                </div>
-              </div>
 
-              {/* Password Input Field */}
-              <div>
-                <div className="flex items-center justify-between mb-1.5">
-                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
-                    Password
-                  </label>
-                  <Link
-                    href="/login/forgot-password"
-                    className="text-xs font-semibold text-blue-600 hover:text-blue-700 hover:underline"
-                  >
-                    Forgot password?
-                  </Link>
-                </div>
-                <div className="relative">
-                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
-                    <Lock className="w-4 h-4" />
+                  {isEmail && (
+                    <>
+                      <div>
+                        <div className="flex items-center justify-between mb-1.5">
+                          <label
+                            htmlFor="login-password"
+                            className="block text-xs font-bold text-slate-700 uppercase tracking-wider"
+                          >
+                            Password
+                          </label>
+                          <Link
+                            href="/login/forgot-password"
+                            className="text-xs font-semibold text-blue-600 hover:text-blue-700 hover:underline"
+                          >
+                            Forgot password?
+                          </Link>
+                        </div>
+                        <div className="relative">
+                          <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                            <Lock className="w-4 h-4" />
+                          </div>
+                          <input
+                            id="login-password"
+                            type={showPassword ? 'text' : 'password'}
+                            required
+                            autoComplete="current-password"
+                            value={password}
+                            onChange={(e) => {
+                              setPassword(e.target.value);
+                              if (errorMsg) setErrorMsg('');
+                            }}
+                            placeholder="Enter your password"
+                            className="w-full bg-slate-50 border border-slate-300 rounded-xl pl-10 pr-11 py-3 text-sm text-slate-900 placeholder-slate-400 focus:bg-white focus:ring-2 focus:ring-blue-600 focus:border-transparent focus:outline-hidden transition-all"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowPassword(!showPassword)}
+                            className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-400 hover:text-slate-600 cursor-pointer transition-colors"
+                            title={showPassword ? 'Hide password' : 'Show password'}
+                          >
+                            {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4 text-slate-400" />}
+                          </button>
+                        </div>
+                      </div>
+                      <button
+                        type="submit"
+                        disabled={loading}
+                        className="w-full mt-2 flex items-center justify-center gap-2 py-3.5 px-4 rounded-xl shadow-md shadow-blue-500/20 text-sm font-black text-white bg-blue-600 hover:bg-blue-700 active:scale-[0.99] focus:outline-hidden disabled:opacity-50 transition-all cursor-pointer"
+                      >
+                        <span>{loading ? 'Signing in...' : 'Login with Password'}</span>
+                        <ArrowRight className="w-4 h-4" />
+                      </button>
+                    </>
+                  )}
+
+                  {isMobile && (
+                    <button
+                      type="submit"
+                      disabled={loading}
+                      className="w-full mt-2 flex items-center justify-center gap-2 py-3.5 px-4 rounded-xl shadow-md shadow-blue-500/20 text-sm font-black text-white bg-blue-600 hover:bg-blue-700 active:scale-[0.99] focus:outline-hidden disabled:opacity-50 transition-all cursor-pointer"
+                    >
+                      <span>{loading ? 'Sending OTP...' : 'Send WhatsApp OTP'}</span>
+                      <ArrowRight className="w-4 h-4" />
+                    </button>
+                  )}
+                </>
+              ) : (
+                <>
+                  <p className="text-sm text-slate-600">
+                    Enter the OTP sent via WhatsApp to <span className="font-bold text-slate-900">{phone}</span>.
+                  </p>
+                  <div>
+                    <label
+                      htmlFor="login-otp"
+                      className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5"
+                    >
+                      One-time password
+                    </label>
+                    <input
+                      id="login-otp"
+                      type="text"
+                      required
+                      autoComplete="one-time-code"
+                      inputMode="numeric"
+                      value={otp}
+                      onChange={(e) => {
+                        setOtp(e.target.value.replace(/\D/g, ''));
+                        if (errorMsg) setErrorMsg('');
+                      }}
+                      placeholder="Enter OTP"
+                      className="w-full bg-slate-50 border border-slate-300 rounded-xl px-4 py-3 text-sm tracking-[0.3em] text-slate-900 placeholder-slate-400 placeholder:tracking-normal focus:bg-white focus:ring-2 focus:ring-blue-600 focus:border-transparent focus:outline-hidden transition-all"
+                    />
                   </div>
-                  <input
-                    type={showPassword ? 'text' : 'password'}
-                    required
-                    value={password}
-                    onChange={(e) => {
-                      setPassword(e.target.value);
-                      if (errorMsg) setErrorMsg('');
-                    }}
-                    placeholder="Enter your password"
-                    className="w-full bg-slate-50 border border-slate-300 rounded-xl pl-10 pr-11 py-3 text-sm text-slate-900 placeholder-slate-400 focus:bg-white focus:ring-2 focus:ring-blue-600 focus:border-transparent focus:outline-hidden transition-all"
-                  />
+                  <button
+                    type="submit"
+                    disabled={loading || !otp}
+                    className="w-full mt-2 flex items-center justify-center gap-2 py-3.5 px-4 rounded-xl shadow-md shadow-blue-500/20 text-sm font-black text-white bg-blue-600 hover:bg-blue-700 active:scale-[0.99] focus:outline-hidden disabled:opacity-50 transition-all cursor-pointer"
+                  >
+                    <span>{loading ? 'Verifying...' : 'Verify OTP'}</span>
+                    <ArrowRight className="w-4 h-4" />
+                  </button>
                   <button
                     type="button"
-                    onClick={() => setShowPassword(!showPassword)}
-                    className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-400 hover:text-slate-600 cursor-pointer transition-colors"
-                    title={showPassword ? 'Hide password' : 'Show password'}
+                    onClick={() => {
+                      setOtpSent(false);
+                      setOtp('');
+                      setErrorMsg('');
+                    }}
+                    className="w-full text-xs font-semibold text-blue-600 hover:text-blue-700 hover:underline"
                   >
-                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4 text-slate-400" />}
+                    Change mobile number
                   </button>
-                </div>
-              </div>
-
-              {/* Submit Button */}
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full mt-2 flex items-center justify-center gap-2 py-3.5 px-4 rounded-xl shadow-md shadow-blue-500/20 text-sm font-black text-white bg-blue-600 hover:bg-blue-700 active:scale-[0.99] focus:outline-hidden disabled:opacity-50 transition-all cursor-pointer"
-              >
-                <span>{loading ? 'Authenticating...' : 'Sign In to Workspace'}</span>
-                <ArrowRight className="w-4 h-4" />
-              </button>
+                </>
+              )}
             </form>
 
             {/* Registration Footer */}
