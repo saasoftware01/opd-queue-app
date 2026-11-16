@@ -4,7 +4,10 @@ import { createClient, type User } from '@supabase/supabase-js';
 import {
   hashWhatsappOtp,
   hashWhatsappPhone,
+  hashWhatsappTestOtp,
   normalizeIndianMobile,
+  WHATSAPP_TEST_OTP,
+  WHATSAPP_TEST_PHONE_MOBILE,
 } from '@/lib/server/whatsapp-otp';
 
 interface AuthUserRecord {
@@ -70,7 +73,12 @@ export async function POST(request: Request) {
   }
 
   const phoneHash = hashWhatsappPhone(phone.mobile, serviceRoleKey);
-  const otpHash = hashWhatsappOtp(phone.mobile, otpCode, serviceRoleKey);
+  const useMockOtp = process.env.NODE_ENV !== 'production'
+    && phone.mobile === WHATSAPP_TEST_PHONE_MOBILE
+    && otpCode === WHATSAPP_TEST_OTP;
+  const otpHash = useMockOtp
+    ? hashWhatsappTestOtp(phone.mobile, otpCode, serviceRoleKey)
+    : hashWhatsappOtp(phone.mobile, otpCode, serviceRoleKey);
   const admin = createClient(supabaseUrl, serviceRoleKey, {
     auth: { autoRefreshToken: false, persistSession: false },
   });

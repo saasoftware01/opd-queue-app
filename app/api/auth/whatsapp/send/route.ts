@@ -2,7 +2,14 @@ import 'server-only';
 
 import { randomInt } from 'node:crypto';
 import { createClient } from '@supabase/supabase-js';
-import { hashWhatsappOtp, hashWhatsappPhone, normalizeIndianMobile } from '@/lib/server/whatsapp-otp';
+import {
+  hashWhatsappOtp,
+  hashWhatsappPhone,
+  hashWhatsappTestOtp,
+  normalizeIndianMobile,
+  WHATSAPP_TEST_OTP,
+  WHATSAPP_TEST_PHONE_MOBILE,
+} from '@/lib/server/whatsapp-otp';
 
 const META_GRAPH_API_VERSION = 'v27.0';
 
@@ -53,14 +60,23 @@ export async function POST(request: Request) {
   const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
   const templateName = process.env.WHATSAPP_TEMPLATE_NAME || 'auth_login_otp';
   const templateLanguage = process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'en_US';
+  const useMockOtp = process.env.NODE_ENV !== 'production'
+    && phone.mobile === WHATSAPP_TEST_PHONE_MOBILE;
+  const metaCredentials = phoneNumberId && accessToken
+    ? { phoneNumberId, accessToken }
+    : null;
 
-  if (!supabaseUrl || !serviceRoleKey || !phoneNumberId || !accessToken) {
+  if (!supabaseUrl || !serviceRoleKey || (!useMockOtp && !metaCredentials)) {
     return jsonResponse({ error: 'WhatsApp OTP service is not configured.' }, 503);
   }
 
-  const otpCode = randomInt(0, 1_000_000).toString().padStart(6, '0');
+  const otpCode = useMockOtp
+    ? WHATSAPP_TEST_OTP
+    : randomInt(0, 1_000_000).toString().padStart(6, '0');
   const phoneHash = hashWhatsappPhone(phone.mobile, serviceRoleKey);
-  const otpHash = hashWhatsappOtp(phone.mobile, otpCode, serviceRoleKey);
+  const otpHash = useMockOtp
+    ? hashWhatsappTestOtp(phone.mobile, otpCode, serviceRoleKey)
+    : hashWhatsappOtp(phone.mobile, otpCode, serviceRoleKey);
   const admin = createClient(supabaseUrl, serviceRoleKey, {
     auth: { autoRefreshToken: false, persistSession: false },
   });
@@ -89,8 +105,17 @@ export async function POST(request: Request) {
     if (error) console.error('Failed to remove unsent WhatsApp OTP:', error);
   };
 
+  if (useMockOtp) {
+    return jsonResponse({ success: true, expiresInSeconds: 180 });
+  }
+
+  if (!metaCredentials) {
+    await releaseOtp();
+    return jsonResponse({ error: 'WhatsApp OTP service is not configured.' }, 503);
+  }
+
   try {
-    const url = `https://graph.facebook.com/${META_GRAPH_API_VERSION}/${encodeURIComponent(phoneNumberId)}/messages`;
+    const url = `https://graph.facebook.com/${META_GRAPH_API_VERSION}/${encodeURIComponent(metaCredentials.phoneNumberId)}/messages`;
     const payload = {
       messaging_product: 'whatsapp',
       to: phone.whatsappRecipient,
@@ -103,6 +128,12 @@ export async function POST(request: Request) {
             type: 'body',
             parameters: [{ type: 'text', text: otpCode }],
           },
+          {
+            type: 'button',
+            sub_type: 'url',
+            index: '0',
+            parameters: [{ type: 'text', text: otpCode }],
+          },
         ],
       },
     };
@@ -110,7 +141,7 @@ export async function POST(request: Request) {
     const response = await fetch(url, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${accessToken}`,
+        Authorization: `Bearer ${metaCredentials.accessToken}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(payload),

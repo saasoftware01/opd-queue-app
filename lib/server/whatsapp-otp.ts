@@ -2,6 +2,9 @@ import 'server-only';
 
 import { createHmac } from 'node:crypto';
 
+export const WHATSAPP_TEST_PHONE_MOBILE = '9074208809';
+export const WHATSAPP_TEST_OTP = '123456';
+
 export function normalizeIndianMobile(value: unknown) {
   if (typeof value !== 'string' || !/^\+?[\d\s()-]+$/.test(value.trim())) return null;
 
@@ -22,4 +25,8 @@ export function hashWhatsappPhone(mobile: string, secret: string) {
 
 export function hashWhatsappOtp(mobile: string, otp: string, secret: string) {
   return createHmac('sha256', secret).update(`otp:${mobile}:${otp}`).digest('hex');
+}
+
+export function hashWhatsappTestOtp(mobile: string, otp: string, secret: string) {
+  return createHmac('sha256', secret).update(`test-otp:${mobile}:${otp}`).digest('hex');
 }
