@@ -27,6 +27,23 @@ The chime plays only on the reception device; the patient's mobile receives a si
 Background push requires HTTPS, browser notification permission, and VAPID setup.
 On iOS, the patient portal must be added to the Home Screen for Web Push support.
 
+## WhatsApp incoming message storage
+
+Apply `supabase/migrations/20261117000100_store_whatsapp_incoming_messages.sql` before
+starting the FastAPI webhook. The webhook stores signed incoming text messages in a
+private table before sending its automatic reply. Duplicate WhatsApp message IDs are
+ignored. It uses `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` from
+`.env.local`; keep the service-role key server-only and never expose it to the browser.
+FastAPI logs only a masked sender number, message ID, text length, and Meta delivery
+status/error code; it does not log the message body or full phone number.
+
+The FastAPI `POST /send-whatsapp-otp` endpoint accepts
+`{"phoneNumber":"+919876543210"}` and sends the `auth_login_otp` template in `en_US`.
+It stores a keyed hash for verification by the existing patient OTP flow, enforces the
+existing one-minute per-number request limit, and never returns the OTP in its response.
+Apply `20261114000100_add_whatsapp_login_otps.sql` and
+`20261114000200_add_whatsapp_login_otp_verification.sql` before using this endpoint.
+
 ## Platform admin workspace
 
 Apply `supabase/migrations/20261111000200_add_admin_dashboard_controls.sql` to add
