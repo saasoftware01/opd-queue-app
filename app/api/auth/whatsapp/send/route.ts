@@ -61,6 +61,7 @@ export async function POST(request: Request) {
   const templateName = process.env.WHATSAPP_TEMPLATE_NAME || 'auth_login_otp';
   const templateLanguage = process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'en_US';
   const useMockOtp = process.env.NODE_ENV !== 'production'
+    && process.env.WHATSAPP_USE_MOCK_OTP === 'true'
     && phone.mobile === WHATSAPP_TEST_PHONE_MOBILE;
   const metaCredentials = phoneNumberId && accessToken
     ? { phoneNumberId, accessToken }

@@ -112,8 +112,8 @@ begin
   return query
   select
     users.id,
-    users.email,
-    users.phone,
+    users.email::text,
+    users.phone::text,
     users.raw_user_meta_data,
     users.raw_app_meta_data
   from auth.users as users
