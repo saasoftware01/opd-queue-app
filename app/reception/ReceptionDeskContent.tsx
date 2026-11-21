@@ -2445,7 +2445,7 @@ export default function ReceptionDeskPage() {
                     width={256}
                     height={256}
                     unoptimized
-npm run de                    className="h-64 w-64"
+                    className="h-64 w-64"
                   />
                 </div>
                 <p className="mt-3 break-all text-[11px] text-slate-400">{clinicBookingUrl}</p>
