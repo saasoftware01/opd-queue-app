@@ -74,6 +74,7 @@ export async function POST(request: Request) {
 
   const phoneHash = hashWhatsappPhone(phone.mobile, serviceRoleKey);
   const useMockOtp = process.env.NODE_ENV !== 'production'
+    && process.env.WHATSAPP_USE_MOCK_OTP === 'true'
     && phone.mobile === WHATSAPP_TEST_PHONE_MOBILE
     && otpCode === WHATSAPP_TEST_OTP;
   const otpHash = useMockOtp
@@ -114,7 +115,7 @@ export async function POST(request: Request) {
     { p_phone_digits: phone.mobile }
   );
   if (lookupError) {
-    console.error('Patient account lookup failed.');
+    console.error('Patient account lookup failed:', lookupError);
     return jsonResponse({ error: 'Unable to load the patient account.' }, 500);
   }
 
