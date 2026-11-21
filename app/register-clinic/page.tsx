@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase/client';
 import { getErrorMessage } from '@/lib/error-message';
+import { isValidPassword, PASSWORD_PATTERN, PASSWORD_REQUIREMENT } from '@/lib/password-policy';
 import IndianCityField from '@/app/components/IndianCityField';
 import { getCanonicalIndianCity } from '@/lib/indian-cities';
 import { Building2, Stethoscope, ArrowLeft, CheckCircle2, AlertCircle, ArrowRight } from 'lucide-react';
@@ -32,6 +33,11 @@ export default function RegisterClinicPage() {
 
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!isValidPassword(password)) {
+      setErrorMsg(PASSWORD_REQUIREMENT);
+      return;
+    }
+
     const city = getCanonicalIndianCity(clinicCity);
     if (!city) {
       setErrorMsg('Select a city from the Indian city suggestions.');
@@ -414,12 +420,15 @@ export default function RegisterClinicPage() {
                   <input
                     type="password"
                     required
-                    minLength={6}
+                    minLength={8}
+                    pattern={PASSWORD_PATTERN}
+                    title={PASSWORD_REQUIREMENT}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    placeholder="Min 6 characters"
+                    placeholder="Create a strong password"
                     className="mt-1 w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:ring-2 focus:ring-blue-500 focus:outline-hidden"
                   />
+                  <p className="mt-1 text-[10px] leading-4 text-slate-500">{PASSWORD_REQUIREMENT}</p>
                 </div>
               </div>
 

@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import type { Session } from '@supabase/supabase-js';
 import { AlertCircle, KeyRound, LoaderCircle, ShieldCheck, Stethoscope } from 'lucide-react';
+import { isValidPassword, PASSWORD_PATTERN, PASSWORD_REQUIREMENT } from '@/lib/password-policy';
 
 type RecoveryState = 'checking' | 'reset' | 'complete' | 'invalid';
 
@@ -153,8 +154,8 @@ export default function RootPage() {
     event.preventDefault();
     setErrorMessage('');
 
-    if (password.length < 6) {
-      setErrorMessage('Your password must be at least 6 characters long.');
+    if (!isValidPassword(password)) {
+      setErrorMessage(PASSWORD_REQUIREMENT);
       return;
     }
     if (password !== confirmPassword) {
@@ -231,7 +232,9 @@ export default function RootPage() {
                   id="root-new-password"
                   type="password"
                   autoComplete="new-password"
-                  minLength={6}
+                  minLength={8}
+                  pattern={PASSWORD_PATTERN}
+                  title={PASSWORD_REQUIREMENT}
                   required
                   value={password}
                   onChange={(event) => setPassword(event.target.value)}
@@ -244,13 +247,16 @@ export default function RootPage() {
                   id="root-confirm-password"
                   type="password"
                   autoComplete="new-password"
-                  minLength={6}
+                  minLength={8}
+                  pattern={PASSWORD_PATTERN}
+                  title={PASSWORD_REQUIREMENT}
                   required
                   value={confirmPassword}
                   onChange={(event) => setConfirmPassword(event.target.value)}
                   className="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-white outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20"
                 />
               </div>
+              <p className="text-xs leading-5 text-slate-400">{PASSWORD_REQUIREMENT}</p>
               {errorMessage && <RecoveryError message={errorMessage} />}
               <button
                 type="submit"

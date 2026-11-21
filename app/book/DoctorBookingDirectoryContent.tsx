@@ -8,6 +8,7 @@ import { patientSupabase } from '@/lib/supabase/patient-client';
 import IndianCityField from '@/app/components/IndianCityField';
 import { getCanonicalIndianCity, matchesIndianCity } from '@/lib/indian-cities';
 import { formatCompactOpdSessions, formatOpdSessions, getOpdSessions, OpdSession } from '@/lib/opd-schedule';
+import { isValidPassword, PASSWORD_PATTERN, PASSWORD_REQUIREMENT } from '@/lib/password-policy';
 import { getClinicDateString, getClinicDateTimeParts, getClinicDayRange } from '@/lib/clinic-day';
 import { 
   Search, 
@@ -36,6 +37,7 @@ import {
   History as HistoryIcon,
   UserRound,
   MapPin,
+  CalendarDays,
 } from 'lucide-react';
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
@@ -319,6 +321,7 @@ function DoctorBookingDirectoryContent() {
   const searchParams = useSearchParams();
   const urlClinicId = searchParams?.get('clinic_id') || null;
   const urlDoctorId = searchParams?.get('doctor_id') || null;
+  const showDoctorPopup = searchParams?.get('show_doctor_popup') === '1';
 
   // Tabs: 'DIRECTORY' or 'TRACKER'
   const [activeTab, setActiveTab] = useState<'DIRECTORY' | 'TRACKER'>('DIRECTORY');
@@ -341,6 +344,7 @@ function DoctorBookingDirectoryContent() {
   
   // Selected doctor for booking modal
   const [selectedDoctor, setSelectedDoctor] = useState<DoctorDirectoryItem | null>(null);
+  const [detailsDoctor, setDetailsDoctor] = useState<DoctorDirectoryItem | null>(null);
   
   // Form fields for new booking
   const [patientName, setPatientName] = useState('');
@@ -799,14 +803,12 @@ function DoctorBookingDirectoryContent() {
         if (!data.user) throw new Error('Unable to sign in. Please try again.');
         applyAuthenticatedUser(data.user);
       } else {
+        if (!isValidPassword(authPassword)) throw new Error(PASSWORD_REQUIREMENT);
         const cleanPhone = phone.trim().replace(/\D/g, '');
         if (!patientName.trim()) throw new Error('Please enter your full name.');
         if (cleanPhone.length !== 10) throw new Error('Please enter a valid 10-digit mobile number.');
         const { referralProgramEnabled } = await refreshReferralSystemSetting();
         const referralCode = patientReferralCode.trim().toUpperCase();
-        if (referralProgramEnabled && !referralCode) {
-          throw new Error('A valid referral code is required to create a patient account.');
-        }
 
         const { data, error } = await patientSupabase.auth.signUp({
           email: authEmail.trim(),
@@ -816,7 +818,7 @@ function DoctorBookingDirectoryContent() {
               account_type: 'patient',
               full_name: patientName.trim(),
               phone: cleanPhone,
-              referred_by: referralProgramEnabled ? referralCode : null,
+              referred_by: referralProgramEnabled && referralCode ? referralCode : null,
             },
           },
         });
@@ -1404,7 +1406,13 @@ function DoctorBookingDirectoryContent() {
 
         if (urlDoctorId) {
           const matched = formatted.find(d => d.id === urlDoctorId);
-          if (matched) setSelectedDoctor(matched);
+          if (matched) {
+            if (showDoctorPopup) {
+              setDetailsDoctor(matched);
+            } else {
+              setSelectedDoctor(matched);
+            }
+          }
         }
       } catch (err: unknown) {
         console.error('Failed to load doctor directory:', err);
@@ -1419,7 +1427,7 @@ function DoctorBookingDirectoryContent() {
     return () => {
       isMounted = false;
     };
-  }, [urlDoctorId, urlClinicId, directoryRefreshKey]);
+  }, [urlDoctorId, urlClinicId, showDoctorPopup, directoryRefreshKey]);
 
   useEffect(() => {
     let refreshTimeout: ReturnType<typeof setTimeout> | undefined;
@@ -2031,6 +2039,25 @@ function DoctorBookingDirectoryContent() {
       setCancelLoading(false);
     }
   };
+
+  const hasFreeToken = globalFreeModeEnabled === true
+    || (
+      globalFreeModeEnabled === false
+      && Boolean(currentUser)
+      && !patientAccountProfileLoading
+      && (patientAccountProfile?.free_tokens_balance ?? 0) > 0
+    );
+  const bookingFeeLabel = globalFreeModeEnabled === true
+    ? 'Free token'
+    : globalFreeModeEnabled === false
+      ? !currentUser
+        ? 'Sign in for fee details'
+        : patientAccountProfileLoading
+          ? 'Checking free tokens'
+          : patientAccountProfile
+            ? hasFreeToken ? 'Free token available' : 'Platform fee'
+            : 'Fee shown at booking'
+      : 'Fee shown at booking';
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 pb-16">
@@ -2695,7 +2722,17 @@ function DoctorBookingDirectoryContent() {
                 {filteredDoctors.map((doc) => (
                   <div
                     key={doc.id}
-                    className="group relative h-full overflow-hidden rounded-3xl border border-slate-200/90 bg-white shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-blue-200 hover:shadow-lg"
+                    tabIndex={0}
+                    aria-label={`View details for ${doc.name}`}
+                    onClick={() => setDetailsDoctor(doc)}
+                    onKeyDown={(event) => {
+                      if (event.target !== event.currentTarget) return;
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        setDetailsDoctor(doc);
+                      }
+                    }}
+                    className="group relative h-full cursor-pointer overflow-hidden rounded-3xl border border-slate-200/90 bg-white shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-blue-200 hover:shadow-lg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
                   >
                     <div className="flex h-full flex-col justify-between p-5">
                     <div>
@@ -2706,8 +2743,10 @@ function DoctorBookingDirectoryContent() {
                         </span>
                         
                         <span className="flex min-h-7 max-w-[45%] items-center gap-1 rounded-full border border-emerald-100 bg-emerald-50 px-2.5 py-1 text-[10px] font-extrabold leading-4 text-emerald-700">
-                          <IndianRupee className="w-3 h-3" />
-                          <span className="truncate">Platform fee or free token</span>
+                          {hasFreeToken
+                            ? <Ticket className="h-3 w-3 shrink-0" />
+                            : <IndianRupee className="h-3 w-3 shrink-0" />}
+                          <span className="truncate">{bookingFeeLabel}</span>
                         </span>
                       </div>
 
@@ -2785,7 +2824,10 @@ function DoctorBookingDirectoryContent() {
                                 title={formatOpdSessions([session])}
                                 aria-label={`${formatCompactOpdSessions([session])}. Tap to see full schedule.`}
                                 aria-describedby={scheduleTooltip?.id === `schedule-tooltip-${doc.id}-${index}` ? scheduleTooltip.id : undefined}
-                                onClick={(event) => toggleScheduleTooltip(event, `schedule-tooltip-${doc.id}-${index}`, formatOpdSessions([session]))}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  toggleScheduleTooltip(event, `schedule-tooltip-${doc.id}-${index}`, formatOpdSessions([session]));
+                                }}
                               >
                                 <Clock className="h-3 w-3 shrink-0 text-blue-600" />
                                 <span className="min-w-0 truncate whitespace-nowrap leading-4">
@@ -2802,7 +2844,10 @@ function DoctorBookingDirectoryContent() {
                               title={`${doc.opd_timing} (${doc.opd_shift})`}
                               aria-label={`${doc.opd_timing} (${doc.opd_shift}). Tap to see full schedule.`}
                               aria-describedby={scheduleTooltip?.id === `schedule-tooltip-${doc.id}-legacy` ? scheduleTooltip.id : undefined}
-                              onClick={(event) => toggleScheduleTooltip(event, `schedule-tooltip-${doc.id}-legacy`, `${doc.opd_timing} (${doc.opd_shift})`)}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                toggleScheduleTooltip(event, `schedule-tooltip-${doc.id}-legacy`, `${doc.opd_timing} (${doc.opd_shift})`);
+                              }}
                             >
                               <Clock className="h-3.5 w-3.5 shrink-0 text-blue-600" />
                               <span className="min-w-0 truncate whitespace-nowrap leading-4">
@@ -2843,28 +2888,6 @@ function DoctorBookingDirectoryContent() {
                       )}
                     </div>
 
-                    {/* Action Button */}
-                    <div className="mt-5 flex items-center justify-between border-t border-slate-100 pt-4">
-                      <div>
-                        <span className="block text-[10px] font-extrabold uppercase tracking-wider text-slate-400">Quick booking</span>
-                        <span className="text-[11px] font-medium text-slate-500">Get your queue token</span>
-                      </div>
-                      <button
-                        type="button"
-                        disabled={Boolean(getDoctorClosureReason(doc))}
-                        onClick={() => {
-                          setSelectedDoctor(doc);
-                          setErrorMsg('');
-                          setAuthError('');
-                          setAuthNotice('');
-                          if (authReady && !currentUser) setShowAuthModal(true);
-                        }}
-                        className="flex cursor-pointer items-center gap-1.5 rounded-xl bg-blue-600 px-4 py-2.5 text-xs font-bold text-white shadow-sm transition-all hover:bg-blue-700 hover:shadow-md active:scale-95 disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-600 disabled:shadow-none"
-                      >
-                        <span>{getDoctorClosureReason(doc) ? 'Closed Today' : 'Book Token'}</span>
-                        {!getDoctorClosureReason(doc) && <ArrowRight className="w-3.5 h-3.5" />}
-                      </button>
-                    </div>
                   </div>
                   </div>
                 ))}
@@ -2873,6 +2896,224 @@ function DoctorBookingDirectoryContent() {
           </div>
         )}
       </main>
+
+      {detailsDoctor && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-3 backdrop-blur-md animate-in fade-in duration-200 sm:p-5"
+          onClick={() => setDetailsDoctor(null)}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') setDetailsDoctor(null);
+          }}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="doctor-details-title"
+            onClick={(event) => event.stopPropagation()}
+            className="flex max-h-[min(48rem,92dvh)] w-full max-w-3xl flex-col overflow-hidden rounded-[1.75rem] border border-white/60 bg-white shadow-2xl shadow-slate-950/30"
+          >
+            <div className="relative shrink-0 overflow-hidden bg-gradient-to-br from-slate-950 via-blue-950 to-indigo-900 px-5 pb-5 pt-6 text-white sm:px-8 sm:pb-6">
+              <div aria-hidden="true" className="pointer-events-none absolute -right-12 -top-20 h-56 w-56 rounded-full bg-blue-400/15 blur-3xl" />
+              <div aria-hidden="true" className="pointer-events-none absolute -bottom-28 left-1/3 h-48 w-48 rounded-full bg-indigo-400/20 blur-3xl" />
+              <div className="relative flex items-start justify-between gap-4">
+                <div className="flex min-w-0 items-center gap-3.5 sm:gap-4">
+                  <span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl border border-white/15 bg-white/10 text-lg font-black text-white shadow-lg backdrop-blur-sm sm:h-16 sm:w-16 sm:text-xl">
+                    {detailsDoctor.name.trim().split(/\s+/).slice(0, 2).map((part) => part.charAt(0)).join('').toUpperCase() || 'D'}
+                  </span>
+                  <div className="min-w-0">
+                    <p className="mb-1 text-[10px] font-bold uppercase tracking-[0.18em] text-blue-200">Doctor profile</p>
+                    <h2 id="doctor-details-title" className="break-words text-xl font-black tracking-tight sm:text-2xl">{detailsDoctor.name}</h2>
+                    <p className="mt-1 flex min-w-0 items-center gap-1.5 text-xs text-blue-100/80">
+                      <Building2 className="h-3.5 w-3.5 shrink-0" />
+                      <span className="truncate">{detailsDoctor.clinic_name || 'Clinic'} · Room {detailsDoctor.room_number}</span>
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setDetailsDoctor(null)}
+                  aria-label="Close doctor details"
+                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-white/10 bg-white/10 text-xl font-bold text-white/75 transition-colors hover:bg-white/20 hover:text-white"
+                >
+                  &times;
+                </button>
+              </div>
+              <div className="relative mt-5 flex flex-wrap items-center gap-2">
+                <span className="rounded-full border border-white/15 bg-white/10 px-3 py-1.5 text-[11px] font-bold text-white/90">
+                  {detailsDoctor.department_name}
+                </span>
+                <span className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[11px] font-bold ${
+                  detailsDoctor.opd_status === 'PAUSED'
+                    ? 'border-amber-300/20 bg-amber-300/10 text-amber-100'
+                    : getDoctorClosureReason(detailsDoctor)
+                      ? 'border-amber-300/20 bg-amber-300/10 text-amber-100'
+                      : isDoctorOpdActive(detailsDoctor, currentTime)
+                        ? 'border-emerald-300/20 bg-emerald-300/10 text-emerald-100'
+                        : 'border-white/15 bg-white/10 text-blue-100'
+                }`}>
+                  <span className={`h-1.5 w-1.5 rounded-full ${
+                    detailsDoctor.opd_status === 'PAUSED' || getDoctorClosureReason(detailsDoctor)
+                      ? 'bg-amber-300'
+                      : isDoctorOpdActive(detailsDoctor, currentTime)
+                        ? 'bg-emerald-300'
+                        : 'bg-blue-200'
+                  }`} />
+                  {detailsDoctor.opd_status === 'PAUSED'
+                    ? 'OPD paused'
+                    : getDoctorClosureReason(detailsDoctor)
+                      ? 'Closed today'
+                      : isDoctorOpdActive(detailsDoctor, currentTime)
+                        ? 'OPD active now'
+                        : 'Outside OPD hours'}
+                </span>
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-300/20 bg-amber-300/10 px-3 py-1.5 text-[11px] font-bold text-amber-100">
+                  <Star className="h-3.5 w-3.5 fill-current" />
+                  {detailsDoctor.rating.toFixed(1)} <span className="font-medium text-amber-100/70">/ 5 rating</span>
+                </span>
+              </div>
+            </div>
+
+            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto bg-slate-50/70 p-4 sm:space-y-5 sm:p-7">
+              <div className="grid gap-4 sm:grid-cols-2">
+                <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
+                  <div className="mb-3 flex items-center gap-2">
+                    <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-blue-50 text-blue-600">
+                      <MapPin className="h-4 w-4" />
+                    </span>
+                    <div>
+                      <h3 className="text-xs font-black text-slate-900">Clinic location</h3>
+                      <p className="text-[10px] font-medium text-slate-400">Where to find the doctor</p>
+                    </div>
+                  </div>
+                  <p className="text-sm font-bold text-slate-800">{detailsDoctor.clinic_name || 'Clinic'}</p>
+                  <p className="mt-1 text-xs text-slate-500">Room {detailsDoctor.room_number}</p>
+                  {(detailsDoctor.clinic_address || detailsDoctor.clinic_city) ? (
+                    <>
+                      <p className="mt-3 text-xs leading-5 text-slate-600">
+                        {[detailsDoctor.clinic_address, detailsDoctor.clinic_city].filter(Boolean).join(', ')}
+                      </p>
+                      <a
+                        href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent([detailsDoctor.clinic_address, detailsDoctor.clinic_city].filter(Boolean).join(', '))}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="mt-3 inline-flex items-center gap-1.5 text-xs font-bold text-blue-700 transition-colors hover:text-blue-900 hover:underline"
+                      >
+                        <MapPin className="h-3.5 w-3.5" />
+                        Open directions
+                        <ArrowRight className="h-3 w-3" />
+                      </a>
+                    </>
+                  ) : (
+                    <p className="mt-3 text-xs text-slate-400">Clinic address not provided.</p>
+                  )}
+                </section>
+
+                <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
+                  <div className="mb-3 flex items-center gap-2">
+                    <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600">
+                      <Clock className="h-4 w-4" />
+                    </span>
+                    <div>
+                      <h3 className="text-xs font-black text-slate-900">OPD timings</h3>
+                      <p className="text-[10px] font-medium text-slate-400">Consultation hours</p>
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    {detailsDoctor.opd_sessions.length > 0 ? detailsDoctor.opd_sessions.map((session, index) => (
+                      <div key={`${session.shift}-${session.start_time}-${session.end_time}-${index}`} className="flex items-center justify-between gap-3 rounded-xl bg-blue-50/70 px-3 py-2.5">
+                        <span className="text-xs font-bold text-blue-800">{session.shift}</span>
+                        <span className="text-right text-xs font-semibold text-slate-700">{formatCompactOpdSessions([session])}</span>
+                      </div>
+                    )) : (
+                      <p className="rounded-xl bg-blue-50/70 px-3 py-2.5 text-xs font-semibold text-slate-700">
+                        {[detailsDoctor.opd_timing, detailsDoctor.opd_shift].filter(Boolean).join(' · ') || 'Schedule not available'}
+                      </p>
+                    )}
+                  </div>
+                  <div className="mt-3 space-y-2 border-t border-slate-100 pt-3">
+                    <p className="flex items-start gap-2 text-xs leading-5 text-slate-600">
+                      <CalendarDays className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400" />
+                      <span><strong className="font-bold text-slate-700">Weekly off:</strong> {detailsDoctor.weekly_off_days.length > 0 ? detailsDoctor.weekly_off_days.join(', ') : 'Not specified'}</span>
+                    </p>
+                    {detailsDoctor.opd_holiday_dates.length > 0 && (
+                      <p className="flex items-start gap-2 text-xs leading-5 text-slate-600">
+                        <CalendarDays className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
+                        <span><strong className="font-bold text-slate-700">Holiday dates:</strong> {detailsDoctor.opd_holiday_dates.join(', ')}</span>
+                      </p>
+                    )}
+                  </div>
+                </section>
+              </div>
+
+              <div className="flex items-center justify-between gap-4 rounded-2xl border border-blue-100 bg-gradient-to-r from-blue-50 to-indigo-50 px-4 py-4 sm:px-5">
+                <div className="flex min-w-0 items-center gap-3">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white text-blue-600 shadow-sm">
+                    <Users className="h-5 w-5" />
+                  </span>
+                  <div>
+                    <p className="text-sm font-black text-slate-900">Live queue</p>
+                    <p className="text-xs text-slate-500">
+                      {(detailsDoctor.waiting_count ?? 0) > 0 ? 'Patients currently waiting' : 'No patients waiting right now'}
+                    </p>
+                  </div>
+                </div>
+                <span className="shrink-0 text-right">
+                  <span className="block text-2xl font-black leading-none text-blue-700">{detailsDoctor.waiting_count ?? 0}</span>
+                  <span className="mt-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    {(detailsDoctor.waiting_count ?? 0) === 1 ? 'patient' : 'patients'}
+                  </span>
+                </span>
+              </div>
+
+              {getDoctorClosureReason(detailsDoctor) && (
+                <p className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-bold leading-5 text-amber-800">
+                  <CalendarDays className="mt-0.5 h-4 w-4 shrink-0" />
+                  <span>Closed today: {getDoctorClosureReason(detailsDoctor)}</span>
+                </p>
+              )}
+              {detailsDoctor.opd_status === 'PAUSED' && (
+                <p className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-bold leading-5 text-amber-800">
+                  <Clock className="mt-0.5 h-4 w-4 shrink-0" />
+                  <span>OPD paused: {detailsDoctor.broadcast_message || 'Doctor is temporarily delayed.'}</span>
+                </p>
+              )}
+            </div>
+
+            <div className="flex shrink-0 flex-col-reverse gap-2 border-t border-slate-200 bg-white px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-7 sm:py-4">
+              <p className="hidden text-[11px] text-slate-400 sm:block">
+                {getDoctorClosureReason(detailsDoctor) ? 'This doctor is not accepting bookings today.' : 'Review the schedule before booking your visit.'}
+              </p>
+              <div className="flex flex-col-reverse gap-2 sm:flex-row">
+                <button
+                  type="button"
+                  onClick={() => setDetailsDoctor(null)}
+                  className="rounded-xl border border-slate-200 px-5 py-3 text-xs font-bold text-slate-600 transition-colors hover:bg-slate-50"
+                >
+                  Close details
+                </button>
+                <button
+                  type="button"
+                  disabled={Boolean(getDoctorClosureReason(detailsDoctor))}
+                  onClick={() => {
+                    setDetailsDoctor(null);
+                    setSelectedDoctor(detailsDoctor);
+                    setErrorMsg('');
+                    setAuthError('');
+                    setAuthNotice('');
+                    if (authReady && !currentUser) setShowAuthModal(true);
+                  }}
+                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 py-3 text-xs font-bold text-white shadow-lg shadow-blue-900/15 transition-all hover:bg-blue-700 hover:shadow-xl disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-600 disabled:shadow-none"
+                >
+                  {getDoctorClosureReason(detailsDoctor)
+                    ? 'Closed Today'
+                    : currentUser ? 'Book a token' : 'Sign in to book'}
+                  {!getDoctorClosureReason(detailsDoctor) && <ArrowRight className="h-4 w-4" />}
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+      )}
 
       {showHistory && currentUser && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-xs">
@@ -3217,19 +3458,19 @@ function DoctorBookingDirectoryContent() {
                   {referralSystemEnabled && (
                     <div>
                       <label htmlFor="patient-referral-code" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                        Referral Code *
+                        Referral Code (Optional)
                       </label>
                       <input
                         id="patient-referral-code"
                         type="text"
-                        required
                         autoComplete="off"
                         maxLength={10}
                         value={patientReferralCode}
                         onChange={(e) => setPatientReferralCode(e.target.value.replace(/[^a-zA-Z0-9]/g, '').slice(0, 10).toUpperCase())}
-                        placeholder="Enter a valid referral code"
+                        placeholder="Enter a referral code if you have one"
                         className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-600 focus:outline-hidden"
                       />
+                      <p className="mt-1 text-[10px] text-slate-500">Leave blank if you do not have a referral code.</p>
                     </div>
                   )}
                 </>
@@ -3290,7 +3531,7 @@ function DoctorBookingDirectoryContent() {
                   {!isPatientEmail && referralSystemEnabled && (
                     <div className="mt-3">
                       <label htmlFor="patient-login-referral-code" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                        Referral Code (Required for new accounts)
+                        Referral Code (Optional)
                       </label>
                       <input
                         id="patient-login-referral-code"
@@ -3299,11 +3540,11 @@ function DoctorBookingDirectoryContent() {
                         maxLength={10}
                         value={patientReferralCode}
                         onChange={(e) => setPatientReferralCode(e.target.value.replace(/[^a-zA-Z0-9]/g, '').slice(0, 10).toUpperCase())}
-                        placeholder="Existing patients can leave this blank"
+                        placeholder="Enter a referral code if you have one"
                         className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-600 focus:outline-hidden"
                       />
                       <p className="mt-1 text-[10px] text-slate-500">
-                        Existing patients can leave this blank to sign in.
+                        Leave blank if you do not have a referral code.
                       </p>
                     </div>
                   )}
@@ -3353,11 +3594,17 @@ function DoctorBookingDirectoryContent() {
                   type="password"
                   required
                   autoComplete={authTab === 'login' ? 'current-password' : 'new-password'}
+                  minLength={authTab === 'register' ? 8 : undefined}
+                  pattern={authTab === 'register' ? PASSWORD_PATTERN : undefined}
+                  title={authTab === 'register' ? PASSWORD_REQUIREMENT : undefined}
                   value={authPassword}
                   onChange={(e) => setAuthPassword(e.target.value)}
-                  placeholder="Enter your password"
+                  placeholder={authTab === 'register' ? 'Create a strong password' : 'Enter your password'}
                   className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-600 focus:outline-hidden"
                 />
+                {authTab === 'register' && (
+                  <p className="mt-1 text-[10px] leading-4 text-slate-500">{PASSWORD_REQUIREMENT}</p>
+                )}
               </div>}
 
               {showPatientResetForm || authTab === 'register' ? (

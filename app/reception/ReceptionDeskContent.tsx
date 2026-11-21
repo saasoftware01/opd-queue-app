@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
+import Image from 'next/image';
 import { useSearchParams, useRouter, usePathname } from 'next/navigation';
 import { supabase } from '@/lib/supabase/client';
 import QRCode from 'qrcode';
@@ -225,6 +226,8 @@ export default function ReceptionDeskPage() {
     if (!currentDoctor?.clinic_id || typeof window === 'undefined') return '';
     const url = new URL('/book', window.location.origin);
     url.searchParams.set('clinic_id', currentDoctor.clinic_id);
+    url.searchParams.set('doctor_id', currentDoctor.id);
+    url.searchParams.set('show_doctor_popup', '1');
     return url.toString();
   }, [currentDoctor]);
 
@@ -2436,10 +2439,13 @@ export default function ReceptionDeskPage() {
             ) : clinicQrDataUrl ? (
               <>
                 <div className="mx-auto w-fit rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
-                  <img
+                  <Image
                     src={clinicQrDataUrl}
                     alt={`Booking QR code for ${currentDoctor?.clinic_name || 'the clinic'}`}
-                    className="h-64 w-64"
+                    width={256}
+                    height={256}
+                    unoptimized
+npm run de                    className="h-64 w-64"
                   />
                 </div>
                 <p className="mt-3 break-all text-[11px] text-slate-400">{clinicBookingUrl}</p>

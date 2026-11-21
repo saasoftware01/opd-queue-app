@@ -16,6 +16,7 @@ import {
   LayoutDashboard,
   LoaderCircle,
   LogOut,
+  Mail,
   Search,
   ShieldCheck,
   Save,
@@ -371,11 +372,15 @@ export default function AdminPage() {
             </div>
           </div>
           <div className="flex items-center gap-3">
-            <span className="hidden max-w-56 truncate text-sm text-slate-600 sm:block">{session.user.email}</span>
+            <div className="hidden max-w-56 items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 sm:flex">
+              <Mail className="h-4 w-4 shrink-0 text-slate-400" />
+              <span className="truncate text-sm font-medium text-slate-600">{session.user.email}</span>
+            </div>
             <button
               type="button"
               onClick={handleLogout}
-              className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+              aria-label="Sign out"
+              className="inline-flex items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-700 transition hover:border-rose-300 hover:bg-rose-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-500"
             >
               <LogOut className="h-4 w-4" />
               <span className="hidden sm:inline">Sign out</span>
@@ -783,8 +788,8 @@ function PlatformSettingsCard({ accessToken }: { accessToken: string }) {
 
           <label className="flex items-center justify-between gap-4 rounded-xl border border-slate-200 p-4">
             <span>
-              <span className="block text-sm font-semibold text-slate-800">Referral Program Enforcement</span>
-              <span className="mt-1 block text-xs text-slate-500">Require valid referral codes at signup and enable referral rewards.</span>
+              <span className="block text-sm font-semibold text-slate-800">Referral Rewards</span>
+              <span className="mt-1 block text-xs text-slate-500">Reward referrals when a valid code is provided at signup. Referral codes are optional.</span>
             </span>
             <input
               type="checkbox"
