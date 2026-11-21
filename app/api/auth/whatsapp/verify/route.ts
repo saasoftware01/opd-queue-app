@@ -124,11 +124,7 @@ export async function POST(request: Request) {
     : null;
   let user: User;
 
-  if (!existingUser && referralProgramEnabled) {
-    if (!referralCode) {
-      return jsonResponse({ error: 'A valid referral code is required to create a patient account.' }, 400);
-    }
-
+  if (!existingUser && referralProgramEnabled && referralCode) {
     const { data: referrer, error: referrerError } = await admin
       .from('patients')
       .select('id')
