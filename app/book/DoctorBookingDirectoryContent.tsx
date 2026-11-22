@@ -321,10 +321,13 @@ function DoctorBookingDirectoryContent() {
   const searchParams = useSearchParams();
   const urlClinicId = searchParams?.get('clinic_id') || null;
   const urlDoctorId = searchParams?.get('doctor_id') || null;
+  const urlTicketId = searchParams?.get('ticket_id') || null;
   const showDoctorPopup = searchParams?.get('show_doctor_popup') === '1';
 
   // Tabs: 'DIRECTORY' or 'TRACKER'
-  const [activeTab, setActiveTab] = useState<'DIRECTORY' | 'TRACKER'>('DIRECTORY');
+  const [activeTab, setActiveTab] = useState<'DIRECTORY' | 'TRACKER'>(
+    () => searchParams?.get('ticket_id') ? 'TRACKER' : 'DIRECTORY'
+  );
 
   const [doctors, setDoctors] = useState<DoctorDirectoryItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1963,6 +1966,100 @@ function DoctorBookingDirectoryContent() {
       if (trackerRequestRef.current === requestId) setTrackerLoading(false);
     }
   }, [currentUser]);
+
+  useEffect(() => {
+    if (!urlTicketId) return;
+    const ticketId = urlTicketId;
+
+    if (!authReady) return;
+    let isActive = true;
+
+    async function loadLinkedTicket() {
+      await Promise.resolve();
+      if (!isActive) return;
+      setTrackerError('');
+      if (!currentUser) {
+        setShowAuthModal(true);
+        setAuthNotice('Sign in with the account that booked this token to track it.');
+        return;
+      }
+
+      const authenticatedUser = currentUser;
+      setTrackerLoading(true);
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ticketId)) {
+        setTrackerError('This token tracking link is invalid.');
+        setTrackerLoading(false);
+        return;
+      }
+
+      try {
+        const { data: ticket, error } = await patientSupabase
+          .from('tickets')
+          .select(`
+            id,
+            patient_user_id,
+            doctor_id,
+            token_number,
+            patient_name,
+            phone_number,
+            status,
+            rating,
+            created_at,
+            booking_fee_paid,
+            doctors (
+              name,
+              room_number,
+              clinic_name
+            )
+          `)
+          .eq('id', ticketId)
+          .eq('patient_user_id', authenticatedUser.id)
+          .maybeSingle();
+
+        if (error) throw error;
+        if (!ticket) {
+          if (isActive) setTrackerError('This token could not be found for your account.');
+          return;
+        }
+
+        const { start, end } = getClinicDayRange();
+        const ticketDate = new Date(ticket.created_at);
+        const isOutsideToday = ticketDate < new Date(start) || ticketDate >= new Date(end);
+        const status = isOutsideToday && ['waiting', 'skipped'].includes(ticket.status)
+          ? 'expired'
+          : ticket.status;
+        const doctor = ticket.doctors as TrackedDoctorDetails | null;
+
+        if (isActive) {
+          setConfirmedTicket({
+            id: ticket.id,
+            patient_user_id: ticket.patient_user_id,
+            token_number: ticket.token_number,
+            patient_name: ticket.patient_name,
+            phone: ticket.phone_number || '',
+            doctor_name: doctor?.name || 'Doctor',
+            clinic_name: doctor?.clinic_name || 'Care Clinic',
+            room_number: doctor?.room_number || 'Room 1',
+            booking_amount: Number(ticket.booking_fee_paid || 0),
+            status,
+            created_at: ticket.created_at,
+            doctor_id: ticket.doctor_id || undefined,
+            rating: ticket.rating,
+          });
+        }
+      } catch (error: unknown) {
+        console.error('WhatsApp token tracking link lookup failed:', error);
+        if (isActive) setTrackerError('Unable to load this token. Please try again.');
+      } finally {
+        if (isActive) setTrackerLoading(false);
+      }
+    }
+
+    void loadLinkedTicket();
+    return () => {
+      isActive = false;
+    };
+  }, [urlTicketId, authReady, currentUser]);
 
   useEffect(() => {
     if (activeTab !== 'TRACKER' || !currentUser) return;

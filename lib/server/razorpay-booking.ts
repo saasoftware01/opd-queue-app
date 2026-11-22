@@ -7,6 +7,7 @@ import {
   verifyRazorpayPaymentSignature,
   type RazorpayPayment,
 } from '@/lib/server/razorpay';
+import { sendTokenBookedWhatsAppTemplate } from '@/lib/server/whatsapp-token-booked';
 
 export class BookingPaymentError extends Error {
   constructor(message: string, readonly status: number) {
@@ -150,6 +151,19 @@ export async function completeRazorpayBookingPayment(
   if (ticketLookupError || !ticket) {
     console.error('Paid booking ticket lookup failed:', ticketLookupError);
     throw new BookingPaymentError('Payment was confirmed, but the token could not be loaded.', 500);
+  }
+
+  if (insertedTicket) {
+    try {
+      await sendTokenBookedWhatsAppTemplate(
+        ticket.phone_number,
+        ticket.id,
+        ticket.patient_name,
+        ticket.token_number
+      );
+    } catch (error) {
+      console.error('Paid token was booked, but its WhatsApp notification failed:', error);
+    }
   }
 
   return ticket;

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { getClinicDateString, getClinicDateTimeParts, getClinicDayRange } from '@/lib/clinic-day';
 import { authenticatePatientRequest, isPatientAuthFailure } from '@/lib/server/patient-auth';
 import { getRazorpayConfiguration, razorpayRequest } from '@/lib/server/razorpay';
+import { sendTokenBookedWhatsAppTemplate } from '@/lib/server/whatsapp-token-booked';
 
 interface BookingOrderPayload {
   doctor_id?: unknown;
@@ -169,6 +170,16 @@ export async function POST(request: Request) {
       if (!isRecord(bookingDecision.ticket)) {
         console.error('Free booking response did not contain a ticket.');
         return Response.json({ error: 'The free token could not be loaded.' }, { status: 500 });
+      }
+      try {
+        await sendTokenBookedWhatsAppTemplate(
+          bookingDecision.ticket.phone_number,
+          bookingDecision.ticket.id,
+          bookingDecision.ticket.patient_name,
+          bookingDecision.ticket.token_number
+        );
+      } catch (error) {
+        console.error('Free token was booked, but its WhatsApp notification failed:', error);
       }
       return Response.json({ mode: 'free', ticket: bookingDecision.ticket });
     }
