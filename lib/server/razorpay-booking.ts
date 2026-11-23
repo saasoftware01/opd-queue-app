@@ -7,6 +7,10 @@ import {
   verifyRazorpayPaymentSignature,
   type RazorpayPayment,
 } from '@/lib/server/razorpay';
+import {
+  getPatientWhatsAppPhone,
+  sendTokenBookedWhatsAppTemplate,
+} from '@/lib/server/whatsapp-token-booked';
 
 export class BookingPaymentError extends Error {
   constructor(message: string, readonly status: number) {
@@ -150,6 +154,33 @@ export async function completeRazorpayBookingPayment(
   if (ticketLookupError || !ticket) {
     console.error('Paid booking ticket lookup failed:', ticketLookupError);
     throw new BookingPaymentError('Payment was confirmed, but the token could not be loaded.', 500);
+  }
+
+  if (insertedTicket) {
+    try {
+      const { data: accountData, error: accountError } = await admin.auth.admin.getUserById(
+        bookingPayment.patient_user_id
+      );
+      if (accountError || !accountData.user) {
+        console.error(
+          'Paid token booker WhatsApp recipient lookup failed:',
+          accountError ?? 'The booking account was not returned.'
+        );
+      } else {
+        const notificationPhone = getPatientWhatsAppPhone(accountData.user);
+        if (!notificationPhone) {
+          throw new Error('The booking account does not have a valid mobile number for WhatsApp.');
+        }
+        await sendTokenBookedWhatsAppTemplate(
+          notificationPhone,
+          ticket.id,
+          ticket.patient_name,
+          ticket.token_number
+        );
+      }
+    } catch (error) {
+      console.error('Paid token was booked, but its WhatsApp notification failed:', error);
+    }
   }
 
   return ticket;

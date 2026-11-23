@@ -135,6 +135,54 @@ interface ConfirmedTicket {
   rating?: number | null;
 }
 
+interface SharedTrackingSnapshot {
+  ticket: {
+    id: string;
+    doctor_id: string | null;
+    token_number: string;
+    patient_name: string;
+    status: string;
+    created_at: string;
+    doctor_name: string;
+    room_number: string;
+    clinic_name: string;
+  };
+  now_serving_token: string | null;
+  patients_ahead: number;
+}
+
+function isSharedTrackingSnapshot(value: unknown): value is SharedTrackingSnapshot {
+  if (!isObjectRecord(value) || !isObjectRecord(value.ticket)) return false;
+  const ticket = value.ticket;
+  return typeof ticket.id === 'string'
+    && (typeof ticket.doctor_id === 'string' || ticket.doctor_id === null)
+    && typeof ticket.token_number === 'string'
+    && typeof ticket.patient_name === 'string'
+    && typeof ticket.status === 'string'
+    && typeof ticket.created_at === 'string'
+    && typeof ticket.doctor_name === 'string'
+    && typeof ticket.room_number === 'string'
+    && typeof ticket.clinic_name === 'string'
+    && (typeof value.now_serving_token === 'string' || value.now_serving_token === null)
+    && typeof value.patients_ahead === 'number';
+}
+
+function toSharedConfirmedTicket(snapshot: SharedTrackingSnapshot): ConfirmedTicket {
+  return {
+    id: snapshot.ticket.id,
+    token_number: snapshot.ticket.token_number,
+    patient_name: snapshot.ticket.patient_name,
+    phone: '',
+    doctor_name: snapshot.ticket.doctor_name,
+    clinic_name: snapshot.ticket.clinic_name,
+    room_number: snapshot.ticket.room_number,
+    booking_amount: 0,
+    status: snapshot.ticket.status,
+    created_at: snapshot.ticket.created_at,
+    doctor_id: snapshot.ticket.doctor_id || undefined,
+  };
+}
+
 interface PatientHistoryTicket {
   id: string;
   token_number: string;
@@ -234,6 +282,26 @@ function getErrorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
+async function fetchSharedTrackingSnapshot(credential: string): Promise<SharedTrackingSnapshot> {
+  const separator = credential.indexOf('.');
+  if (separator <= 0) throw new Error('This shared tracking link is invalid.');
+  const ticketId = credential.slice(0, separator);
+  const signature = credential.slice(separator + 1);
+  const query = new URLSearchParams({ ticket_id: ticketId, signature });
+  const response = await fetch(`/api/public/tickets/track?${query.toString()}`, { cache: 'no-store' });
+  const result: unknown = await response.json();
+  if (!response.ok) {
+    const message = isObjectRecord(result) && typeof result.error === 'string'
+      ? result.error
+      : 'Unable to load this shared token.';
+    throw new Error(message);
+  }
+  if (!isSharedTrackingSnapshot(result)) {
+    throw new Error('The shared token response was invalid.');
+  }
+  return result;
+}
+
 const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const PATIENT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const PATIENT_ACTIVITY_STORAGE_KEY = 'opd-queue-patient-last-activity';
@@ -321,10 +389,22 @@ function DoctorBookingDirectoryContent() {
   const searchParams = useSearchParams();
   const urlClinicId = searchParams?.get('clinic_id') || null;
   const urlDoctorId = searchParams?.get('doctor_id') || null;
+  const urlTrackingCredential = searchParams?.get('ticket_id') || null;
+  const credentialSeparator = urlTrackingCredential?.indexOf('.') ?? -1;
+  const urlTicketId = urlTrackingCredential
+    ? credentialSeparator >= 0
+      ? urlTrackingCredential.slice(0, credentialSeparator)
+      : urlTrackingCredential
+    : null;
+  const urlTicketSignature = credentialSeparator >= 0
+    ? urlTrackingCredential?.slice(credentialSeparator + 1) || ''
+    : null;
   const showDoctorPopup = searchParams?.get('show_doctor_popup') === '1';
 
   // Tabs: 'DIRECTORY' or 'TRACKER'
-  const [activeTab, setActiveTab] = useState<'DIRECTORY' | 'TRACKER'>('DIRECTORY');
+  const [activeTab, setActiveTab] = useState<'DIRECTORY' | 'TRACKER'>(
+    () => searchParams?.get('ticket_id') ? 'TRACKER' : 'DIRECTORY'
+  );
 
   const [doctors, setDoctors] = useState<DoctorDirectoryItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1038,6 +1118,10 @@ function DoctorBookingDirectoryContent() {
   
   // Confirmed slip / Active tracked ticket
   const [confirmedTicket, setConfirmedTicket] = useState<ConfirmedTicket | null>(null);
+  const [isSharedTicketViewer, setIsSharedTicketViewer] = useState(false);
+  const [sharedTrackingCredential, setSharedTrackingCredential] = useState<string | null>(null);
+  const [copyTrackingLinkLoading, setCopyTrackingLinkLoading] = useState(false);
+  const [copyTrackingLinkMessage, setCopyTrackingLinkMessage] = useState('');
   const [trackedDoctor, setTrackedDoctor] = useState<TrackedDoctorStatus | null>(null);
   const [cancelLoading, setCancelLoading] = useState(false);
   const [callAlertMessage, setCallAlertMessage] = useState('');
@@ -1559,7 +1643,7 @@ function DoctorBookingDirectoryContent() {
   const trackedDoctorId = confirmedTicket?.doctor_id;
 
   useEffect(() => {
-    if (!trackedDoctorId) return;
+    if (!trackedDoctorId || isSharedTicketViewer) return;
 
     let isActive = true;
 
@@ -1595,7 +1679,7 @@ function DoctorBookingDirectoryContent() {
       isActive = false;
       patientSupabase.removeChannel(channel);
     };
-  }, [trackedDoctorId]);
+  }, [trackedDoctorId, isSharedTicketViewer]);
 
   useEffect(() => {
     if (!confirmedTicketId) return;
@@ -1604,6 +1688,17 @@ function DoctorBookingDirectoryContent() {
 
     async function syncLiveQueuePosition() {
       try {
+        if (sharedTrackingCredential) {
+          const snapshot = await fetchSharedTrackingSnapshot(sharedTrackingCredential);
+          setTrackerError('');
+          setConfirmedTicket((previous) => previous
+            ? { ...previous, ...toSharedConfirmedTicket(snapshot) }
+            : null);
+          setNowServingToken(snapshot.now_serving_token);
+          setPatientsAhead(snapshot.patients_ahead);
+          return;
+        }
+
         const { start, end } = getClinicDayRange();
 
         const { data: currentT } = await patientSupabase
@@ -1651,10 +1746,20 @@ function DoctorBookingDirectoryContent() {
         }
       } catch (err) {
         console.error('Queue sync error:', err);
+        if (sharedTrackingCredential) {
+          setTrackerError(getErrorMessage(err, 'Unable to refresh the shared token.'));
+        }
       }
     }
 
     syncLiveQueuePosition();
+
+    if (sharedTrackingCredential) {
+      const refreshInterval = window.setInterval(() => {
+        void syncLiveQueuePosition();
+      }, 5000);
+      return () => window.clearInterval(refreshInterval);
+    }
 
     const channel = patientSupabase
       .channel(`live-ticket-${activeTicketId}`)
@@ -1670,7 +1775,7 @@ function DoctorBookingDirectoryContent() {
     return () => {
       patientSupabase.removeChannel(channel);
     };
-  }, [confirmedTicketId]);
+  }, [confirmedTicketId, sharedTrackingCredential]);
 
   // 3. Filter doctors by Search Query or Clinic Parameter
   const filteredDoctors = useMemo(() => {
@@ -1851,6 +1956,9 @@ function DoctorBookingDirectoryContent() {
         status: ticketData.status,
         doctor_id: selectedDoctor.id,
       });
+      setIsSharedTicketViewer(false);
+      setSharedTrackingCredential(null);
+      setCopyTrackingLinkMessage('');
 
       void fetchPatientAccountProfile(currentUser.id)
         .then((profile) => {
@@ -1965,6 +2073,172 @@ function DoctorBookingDirectoryContent() {
   }, [currentUser]);
 
   useEffect(() => {
+    if (!urlTicketId) return;
+    const ticketId = urlTicketId;
+
+    if (!authReady) return;
+    let isActive = true;
+
+    async function loadLinkedTicket() {
+      await Promise.resolve();
+      if (!isActive) return;
+      setTrackerError('');
+      if (urlTicketSignature === null && !currentUser) {
+        setShowAuthModal(true);
+        setAuthNotice('Sign in with the account that booked this token to track it.');
+        return;
+      }
+
+      setTrackerLoading(true);
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ticketId)) {
+        setTrackerError('This token tracking link is invalid.');
+        setTrackerLoading(false);
+        return;
+      }
+
+      try {
+        if (urlTicketSignature !== null) {
+          const credential = `${ticketId}.${urlTicketSignature}`;
+          if (currentUser) {
+            const { data: ownedTicket, error: ownerLookupError } = await patientSupabase
+              .from('tickets')
+              .select(`
+                id,
+                patient_user_id,
+                doctor_id,
+                token_number,
+                patient_name,
+                phone_number,
+                status,
+                rating,
+                created_at,
+                booking_fee_paid,
+                doctors (
+                  name,
+                  room_number,
+                  clinic_name
+                )
+              `)
+              .eq('id', ticketId)
+              .eq('patient_user_id', currentUser.id)
+              .maybeSingle();
+
+            if (ownerLookupError) throw ownerLookupError;
+            if (ownedTicket) {
+              const { start, end } = getClinicDayRange();
+              const ticketDate = new Date(ownedTicket.created_at);
+              const isOutsideToday = ticketDate < new Date(start) || ticketDate >= new Date(end);
+              const status = isOutsideToday && ['waiting', 'skipped'].includes(ownedTicket.status)
+                ? 'expired'
+                : ownedTicket.status;
+              const doctor = ownedTicket.doctors as TrackedDoctorDetails | null;
+              setIsSharedTicketViewer(false);
+              setSharedTrackingCredential(null);
+              setConfirmedTicket({
+                id: ownedTicket.id,
+                patient_user_id: ownedTicket.patient_user_id,
+                token_number: ownedTicket.token_number,
+                patient_name: ownedTicket.patient_name,
+                phone: ownedTicket.phone_number || '',
+                doctor_name: doctor?.name || 'Doctor',
+                clinic_name: doctor?.clinic_name || 'Care Clinic',
+                room_number: doctor?.room_number || 'Room 1',
+                booking_amount: Number(ownedTicket.booking_fee_paid || 0),
+                status,
+                created_at: ownedTicket.created_at,
+                doctor_id: ownedTicket.doctor_id || undefined,
+                rating: ownedTicket.rating,
+              });
+              return;
+            }
+          }
+
+          setShowAuthModal(false);
+          setIsSharedTicketViewer(true);
+          setSharedTrackingCredential(credential);
+          setActiveTab('TRACKER');
+          const snapshot = await fetchSharedTrackingSnapshot(credential);
+          if (isActive) {
+            setConfirmedTicket(toSharedConfirmedTicket(snapshot));
+            setNowServingToken(snapshot.now_serving_token);
+            setPatientsAhead(snapshot.patients_ahead);
+          }
+          return;
+        }
+
+        setIsSharedTicketViewer(false);
+        setSharedTrackingCredential(null);
+        const authenticatedUser = currentUser;
+        if (!authenticatedUser) return;
+        const { data: ticket, error } = await patientSupabase
+          .from('tickets')
+          .select(`
+            id,
+            patient_user_id,
+            doctor_id,
+            token_number,
+            patient_name,
+            phone_number,
+            status,
+            rating,
+            created_at,
+            booking_fee_paid,
+            doctors (
+              name,
+              room_number,
+              clinic_name
+            )
+          `)
+          .eq('id', ticketId)
+          .eq('patient_user_id', authenticatedUser.id)
+          .maybeSingle();
+
+        if (error) throw error;
+        if (!ticket) {
+          if (isActive) setTrackerError('This token could not be found for your account.');
+          return;
+        }
+
+        const { start, end } = getClinicDayRange();
+        const ticketDate = new Date(ticket.created_at);
+        const isOutsideToday = ticketDate < new Date(start) || ticketDate >= new Date(end);
+        const status = isOutsideToday && ['waiting', 'skipped'].includes(ticket.status)
+          ? 'expired'
+          : ticket.status;
+        const doctor = ticket.doctors as TrackedDoctorDetails | null;
+
+        if (isActive) {
+          setConfirmedTicket({
+            id: ticket.id,
+            patient_user_id: ticket.patient_user_id,
+            token_number: ticket.token_number,
+            patient_name: ticket.patient_name,
+            phone: ticket.phone_number || '',
+            doctor_name: doctor?.name || 'Doctor',
+            clinic_name: doctor?.clinic_name || 'Care Clinic',
+            room_number: doctor?.room_number || 'Room 1',
+            booking_amount: Number(ticket.booking_fee_paid || 0),
+            status,
+            created_at: ticket.created_at,
+            doctor_id: ticket.doctor_id || undefined,
+            rating: ticket.rating,
+          });
+        }
+      } catch (error: unknown) {
+        console.error('WhatsApp token tracking link lookup failed:', error);
+        if (isActive) setTrackerError(getErrorMessage(error, 'Unable to load this token. Please try again.'));
+      } finally {
+        if (isActive) setTrackerLoading(false);
+      }
+    }
+
+    void loadLinkedTicket();
+    return () => {
+      isActive = false;
+    };
+  }, [urlTicketId, urlTicketSignature, authReady, currentUser]);
+
+  useEffect(() => {
     if (activeTab !== 'TRACKER' || !currentUser) return;
 
     const channel = patientSupabase
@@ -1982,13 +2256,69 @@ function DoctorBookingDirectoryContent() {
 
   const handleOpenPatientTracker = () => {
     setConfirmedTicket(null);
+    setIsSharedTicketViewer(false);
+    setSharedTrackingCredential(null);
     setShowProfileMenu(false);
     setActiveTab('TRACKER');
     void loadPatientTrackerTickets(true);
   };
 
+  const handleCopyTrackingLink = async () => {
+    if (
+      !confirmedTicket
+      || !currentUser
+      || confirmedTicket.patient_user_id !== currentUser.id
+    ) {
+      return;
+    }
+
+    setCopyTrackingLinkLoading(true);
+    setCopyTrackingLinkMessage('');
+    try {
+      const { data: { session }, error: sessionError } = await patientSupabase.auth.getSession();
+      if (sessionError) throw sessionError;
+      if (!session) throw new Error('Your sign-in session has expired. Please sign in again.');
+
+      const response = await fetch('/api/patient/tickets/tracking-link', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${session.access_token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ ticket_id: confirmedTicket.id }),
+      });
+      const result: unknown = await response.json();
+      if (!response.ok) {
+        const message = isObjectRecord(result) && typeof result.error === 'string'
+          ? result.error
+          : 'Unable to create the tracking link.';
+        throw new Error(message);
+      }
+      if (!isObjectRecord(result) || typeof result.tracking_credential !== 'string') {
+        throw new Error('The tracking-link response was invalid.');
+      }
+
+      const trackingUrl = new URL('/book', window.location.origin);
+      trackingUrl.searchParams.set('ticket_id', result.tracking_credential);
+      await navigator.clipboard.writeText(trackingUrl.toString());
+      setCopyTrackingLinkMessage('Read-only tracking link copied. Anyone with the link can view this token.');
+    } catch (error: unknown) {
+      console.error('Copying patient tracking link failed:', error);
+      setCopyTrackingLinkMessage(getErrorMessage(error, 'Unable to copy the tracking link.'));
+    } finally {
+      setCopyTrackingLinkLoading(false);
+    }
+  };
+
   const handlePatientRating = async (rating: number) => {
-    if (!confirmedTicket || confirmedTicket.status !== 'completed' || confirmedTicket.rating != null) return;
+    if (
+      !confirmedTicket
+      || !currentUser
+      || confirmedTicket.patient_user_id !== currentUser.id
+      || isSharedTicketViewer
+      || confirmedTicket.status !== 'completed'
+      || confirmedTicket.rating != null
+    ) return;
 
     setRatingSaving(true);
     setRatingMessage('');
@@ -2012,7 +2342,12 @@ function DoctorBookingDirectoryContent() {
 
   // 6. Cancel Ticket
   const handleCancelBooking = async () => {
-    if (!confirmedTicket) return;
+    if (
+      !confirmedTicket
+      || !currentUser
+      || confirmedTicket.patient_user_id !== currentUser.id
+      || isSharedTicketViewer
+    ) return;
     const confirm = window.confirm('Are you sure you want to cancel this consultation token?');
     if (!confirm) return;
 
@@ -2356,6 +2691,16 @@ function DoctorBookingDirectoryContent() {
                   ? `Proceed inside ${confirmedTicket.room_number}`
                   : 'Live updates active · Keep this screen open'}
               </p>
+              {isSharedTicketViewer && (
+                <p className="mt-3 rounded-xl bg-white/15 px-3 py-2 text-xs font-semibold text-white">
+                  Shared read-only view. Only the account that booked this token can change or cancel it.
+                </p>
+              )}
+              {isSharedTicketViewer && trackerError && (
+                <p role="status" className="mt-2 text-xs font-semibold text-white/90">
+                  {trackerError}
+                </p>
+              )}
               {trackedDoctor && trackedDoctor.id === confirmedTicket.doctor_id && trackedDoctor.opd_status === 'PAUSED' && (
                 <div className="mt-4 flex min-h-12 items-start gap-2 rounded-xl bg-amber-500 p-3 text-left text-xs font-bold leading-4 text-white shadow-sm animate-pulse">
                   <Volume2 className="mt-0.5 h-4 w-4 shrink-0" />
@@ -2393,6 +2738,15 @@ function DoctorBookingDirectoryContent() {
                   </div>
                   <p className="text-xs text-amber-700 leading-relaxed">
                     Your token was skipped. Please ask the receptionist to reactivate it before continuing.
+                  </p>
+                </div>
+              ) : confirmedTicket.status === 'completed' && isSharedTicketViewer ? (
+                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-center">
+                  <div className="text-xs font-bold uppercase tracking-wide text-emerald-800">
+                    Visit Complete
+                  </div>
+                  <p className="mt-2 text-xs leading-relaxed text-emerald-700">
+                    This consultation has been completed.
                   </p>
                 </div>
               ) : confirmedTicket.status === 'completed' ? (
@@ -2511,10 +2865,12 @@ function DoctorBookingDirectoryContent() {
                   <span className="text-slate-400 font-medium">Doctor:</span>
                   <span className="font-bold text-slate-800">{confirmedTicket.doctor_name} ({confirmedTicket.room_number})</span>
                 </div>
+                {!isSharedTicketViewer && (
                 <div className="flex justify-between items-center">
                   <span className="text-slate-400 font-medium">Registered Mobile:</span>
                   <span className="font-bold text-slate-800">+91 {confirmedTicket.phone}</span>
                 </div>
+                )}
                 <div className="flex justify-between items-center">
                   <span className="text-slate-400 font-medium">Status:</span>
                   <span className={`font-black uppercase text-xs ${
@@ -2547,6 +2903,35 @@ function DoctorBookingDirectoryContent() {
 
               {/* Action Buttons */}
               <div className={confirmedTicket.status === 'waiting' ? 'grid grid-cols-2 gap-2.5' : 'space-y-2.5'}>
+                {!isSharedTicketViewer
+                  && currentUser?.id === confirmedTicket.patient_user_id
+                  && (
+                    <>
+                      <button
+                        type="button"
+                        disabled={copyTrackingLinkLoading}
+                        onClick={() => void handleCopyTrackingLink()}
+                        className={`w-full px-2 py-3 rounded-xl border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 text-xs font-bold transition-colors cursor-pointer flex items-center justify-center gap-2 disabled:opacity-50 ${
+                          confirmedTicket.status === 'waiting' ? 'col-span-2' : ''
+                        }`}
+                      >
+                        <Copy className="w-4 h-4" />
+                        <span>{copyTrackingLinkLoading ? 'Creating Link...' : 'Copy Read-Only Tracking Link'}</span>
+                      </button>
+                      {copyTrackingLinkMessage && (
+                        <p
+                          role="status"
+                          className={`text-center text-xs font-semibold ${
+                            copyTrackingLinkMessage.startsWith('Read-only')
+                              ? 'text-emerald-700'
+                              : 'text-rose-600'
+                          } ${confirmedTicket.status === 'waiting' ? 'col-span-2' : ''}`}
+                        >
+                          {copyTrackingLinkMessage}
+                        </p>
+                      )}
+                    </>
+                  )}
                 <button
                   type="button"
                   onClick={() => window.print()}
@@ -2556,7 +2941,10 @@ function DoctorBookingDirectoryContent() {
                   <span>Print / Save Slip</span>
                 </button>
 
-                {confirmedTicket.status === 'waiting' && (
+                {confirmedTicket.status === 'waiting'
+                  && !isSharedTicketViewer
+                  && currentUser?.id === confirmedTicket.patient_user_id
+                  && (
                   <button
                     type="button"
                     disabled={cancelLoading}
@@ -2570,7 +2958,14 @@ function DoctorBookingDirectoryContent() {
 
                 <button
                   type="button"
-                  onClick={() => setConfirmedTicket(null)}
+                  onClick={() => {
+                    setConfirmedTicket(null);
+                    if (isSharedTicketViewer) {
+                      setIsSharedTicketViewer(false);
+                      setSharedTrackingCredential(null);
+                      setActiveTab('DIRECTORY');
+                    }
+                  }}
                   className={`w-full py-2.5 text-center text-xs font-bold rounded-xl transition-colors cursor-pointer ${
                     confirmedTicket.status === 'waiting' ? 'col-span-2 justify-self-center' : ''
                   } ${
@@ -2655,6 +3050,8 @@ function DoctorBookingDirectoryContent() {
                         type="button"
                         onClick={() => {
                           setConfirmedTicket(ticket);
+                          setIsSharedTicketViewer(false);
+                          setSharedTrackingCredential(null);
                           setRatingMessage('');
                         }}
                         className="col-span-2 inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-xs font-bold text-white shadow-sm transition hover:bg-blue-700 sm:col-span-1 sm:w-auto"
@@ -2687,6 +3084,29 @@ function DoctorBookingDirectoryContent() {
             )}
           </div>
         )}
+
+        {activeTab === 'TRACKER'
+          && !currentUser
+          && !confirmedTicket
+          && urlTicketSignature !== null
+          && (
+            <div className="mx-auto max-w-md rounded-3xl border border-slate-200 bg-white px-6 py-10 text-center shadow-sm">
+              {trackerLoading ? (
+                <>
+                  <div className="mx-auto mb-3 h-8 w-8 animate-spin rounded-full border-4 border-blue-600 border-t-transparent" />
+                  <p className="text-sm font-bold text-slate-700">Loading shared token...</p>
+                </>
+              ) : (
+                <>
+                  <AlertCircle className="mx-auto mb-3 h-8 w-8 text-rose-500" />
+                  <h2 className="text-sm font-extrabold text-slate-900">Unable to open tracking link</h2>
+                  <p role="alert" className="mt-2 text-xs leading-5 text-rose-700">
+                    {trackerError || 'This shared tracking link is invalid or unavailable.'}
+                  </p>
+                </>
+              )}
+            </div>
+          )}
 
         {/* VIEW 3: DOCTOR DIRECTORY LIST */}
         {activeTab === 'DIRECTORY' && !confirmedTicket && (
@@ -3289,7 +3709,7 @@ function DoctorBookingDirectoryContent() {
                   />
                 </div>
                 <span className="text-[10px] text-slate-400 block mt-1">
-                  Your token number will be assigned to this phone number.
+                  This is the patient&apos;s contact number. The WhatsApp tracking link will be sent to your signed-in account&apos;s mobile number.
                 </span>
               </div>
 

@@ -44,6 +44,28 @@ existing one-minute per-number request limit, and never returns the OTP in its r
 Apply `20261114000100_add_whatsapp_login_otps.sql` and
 `20261114000200_add_whatsapp_login_otp_verification.sql` before using this endpoint.
 
+## WhatsApp token booking notifications
+
+After an authenticated patient successfully books a token (free booking or captured
+online payment), the server sends the `book_token_2` WhatsApp template by default. Set
+`WHATSAPP_TOKEN_BOOKED_TEMPLATE_NAME` and
+`WHATSAPP_TOKEN_BOOKED_TEMPLATE_LANGUAGE` to the exact approved template name and
+language code. The body variables are sent in order as patient name (`{{1}}`) and
+display token number (`{{2}}`). The tracking link is sent to the signed-in booker's
+account mobile number; the ticket's phone number remains the patient's contact.
+The sender uses `WHATSAPP_PHONE_NUMBER_ID` and
+`WHATSAPP_ACCESS_TOKEN`.
+
+The template's URL button must be configured in Meta as
+`https://opd-queue-app.vercel.app/book?ticket_id={{1}}` and approved with the dynamic
+URL suffix. The button's `{{1}}` is independent of the body variables; the app supplies
+a signed, read-only tracking credential as that suffix. The booker can copy a separate
+read-only link from the token slip and share it. Anyone with the link can see the
+patient name, token, clinic, doctor, and live queue status, but cannot change or cancel
+the booking. The signed-in account that booked the token retains those controls.
+If WhatsApp delivery fails, the booking remains successful and the failure is logged
+by the server.
+
 ## Platform admin workspace
 
 Apply `supabase/migrations/20261111000200_add_admin_dashboard_controls.sql` to add
