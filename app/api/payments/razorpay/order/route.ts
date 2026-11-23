@@ -2,7 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { getClinicDateString, getClinicDateTimeParts, getClinicDayRange } from '@/lib/clinic-day';
 import { authenticatePatientRequest, isPatientAuthFailure } from '@/lib/server/patient-auth';
 import { getRazorpayConfiguration, razorpayRequest } from '@/lib/server/razorpay';
-import { sendTokenBookedWhatsAppTemplate } from '@/lib/server/whatsapp-token-booked';
+import {
+  getPatientWhatsAppPhone,
+  sendTokenBookedWhatsAppTemplate,
+} from '@/lib/server/whatsapp-token-booked';
 
 interface BookingOrderPayload {
   doctor_id?: unknown;
@@ -29,6 +32,12 @@ const weekdayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'F
 export async function POST(request: Request) {
   const auth = await authenticatePatientRequest(request);
   if (isPatientAuthFailure(auth)) return auth.response;
+  const notificationPhone = getPatientWhatsAppPhone(auth.user);
+  if (!notificationPhone) {
+    return Response.json({
+      error: 'Add a valid mobile number to your signed-in account to receive token tracking links on WhatsApp.',
+    }, { status: 400 });
+  }
 
   let requestBody: unknown;
   try {
@@ -173,7 +182,7 @@ export async function POST(request: Request) {
       }
       try {
         await sendTokenBookedWhatsAppTemplate(
-          bookingDecision.ticket.phone_number,
+          notificationPhone,
           bookingDecision.ticket.id,
           bookingDecision.ticket.patient_name,
           bookingDecision.ticket.token_number

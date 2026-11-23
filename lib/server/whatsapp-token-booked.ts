@@ -1,8 +1,18 @@
 import 'server-only';
 
 import { normalizeIndianMobile } from '@/lib/server/whatsapp-otp';
+import { createTicketTrackingCredential } from '@/lib/server/ticket-tracking-link';
 
 const META_GRAPH_API_VERSION = 'v27.0';
+
+export function getPatientWhatsAppPhone(user: {
+  phone?: string | null;
+  user_metadata?: { phone?: unknown } | null;
+}) {
+  return normalizeIndianMobile(user.phone)?.mobile
+    ?? normalizeIndianMobile(user.user_metadata?.phone)?.mobile
+    ?? null;
+}
 
 function getMetaError(value: unknown) {
   if (typeof value !== 'object' || value === null || !('error' in value)) return null;
@@ -45,8 +55,8 @@ export async function sendTokenBookedWhatsAppTemplate(
     throw new Error('WhatsApp business messaging is not configured.');
   }
 
-  const templateName = process.env.WHATSAPP_TOKEN_BOOKED_TEMPLATE_NAME || 'token_booked';
-  const templateLanguage = process.env.WHATSAPP_TOKEN_BOOKED_TEMPLATE_LANGUAGE || 'en';
+  const templateName = process.env.WHATSAPP_TOKEN_BOOKED_TEMPLATE_NAME || 'book_token_2';
+  const templateLanguage = process.env.WHATSAPP_TOKEN_BOOKED_TEMPLATE_LANGUAGE || 'en_US';
   const response = await fetch(
     `https://graph.facebook.com/${META_GRAPH_API_VERSION}/${encodeURIComponent(phoneNumberId)}/messages`,
     {
@@ -74,7 +84,7 @@ export async function sendTokenBookedWhatsAppTemplate(
               type: 'button',
               sub_type: 'url',
               index: '0',
-              parameters: [{ type: 'text', text: ticketId }],
+              parameters: [{ type: 'text', text: createTicketTrackingCredential(ticketId) }],
             },
           ],
         },
