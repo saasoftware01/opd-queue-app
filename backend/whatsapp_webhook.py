@@ -19,6 +19,7 @@ META_GRAPH_API_VERSION = "v27.0"
 OTP_TEMPLATE_NAME = "auth_login_otp"
 OTP_TEMPLATE_LANGUAGE = "en_US"
 OTP_EXPIRY_SECONDS = 180
+OTP_RESEND_COOLDOWN_SECONDS = 60
 
 
 def _normalize_indian_mobile(value: Any) -> tuple[str, str] | None:
@@ -186,7 +187,8 @@ async def send_whatsapp_otp(request: Request) -> dict[str, Any]:
     if not reserved:
         raise HTTPException(
             status_code=429,
-            detail="Please wait one minute before requesting another OTP.",
+            detail=f"Please wait {OTP_RESEND_COOLDOWN_SECONDS} seconds before requesting another OTP.",
+            headers={"Retry-After": str(OTP_RESEND_COOLDOWN_SECONDS)},
         )
 
     template_name = os.getenv("WHATSAPP_TEMPLATE_NAME") or OTP_TEMPLATE_NAME
@@ -229,6 +231,7 @@ async def send_whatsapp_otp(request: Request) -> dict[str, Any]:
         raise HTTPException(
             status_code=502,
             detail="Unable to send the WhatsApp verification code.",
+            headers={"Retry-After": str(OTP_RESEND_COOLDOWN_SECONDS)},
         ) from exc
 
     if not response.is_success:
@@ -243,9 +246,14 @@ async def send_whatsapp_otp(request: Request) -> dict[str, Any]:
         raise HTTPException(
             status_code=502,
             detail="Unable to send the WhatsApp verification code.",
+            headers={"Retry-After": str(OTP_RESEND_COOLDOWN_SECONDS)},
         )
 
-    return {"success": True, "expiresInSeconds": OTP_EXPIRY_SECONDS}
+    return {
+        "success": True,
+        "expiresInSeconds": OTP_EXPIRY_SECONDS,
+        "resendAfterSeconds": OTP_RESEND_COOLDOWN_SECONDS,
+    }
 
 
 async def store_incoming_message(

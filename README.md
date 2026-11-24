@@ -42,12 +42,13 @@ WhatsApp OTPs are used only to verify a mobile number during registration and to
 a forgotten password. The FastAPI `POST /send-whatsapp-otp` endpoint accepts
 `{"phoneNumber":"+919876543210","purpose":"registration"}` (or
 `"purpose":"password_reset"`) and sends the `auth_login_otp` template in `en_US`.
-It stores a purpose-scoped keyed hash, enforces the one-minute per-number-and-purpose
-request limit, and never returns the OTP in its response.
+It stores a purpose-scoped keyed hash, enforces a 60-second per-number cooldown across
+purposes, and never returns the OTP in its response.
 Apply `20261114000100_add_whatsapp_login_otps.sql` and
 `20261114000200_add_whatsapp_login_otp_verification.sql` before using this endpoint,
 then apply `20261124000100_scope_whatsapp_otps_and_phone_lookup.sql` for purpose-scoped
-registration/reset OTPs and mobile-number password sign-in.
+registration/reset OTPs and mobile-number password sign-in, followed by
+`20261124000200_enforce_whatsapp_otp_recipient_cooldown.sql` for the shared resend limit.
 
 ## WhatsApp token booking notifications
 

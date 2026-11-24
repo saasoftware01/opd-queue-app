@@ -133,6 +133,7 @@ interface ConfirmedTicket {
   created_at?: string;
   doctor_id?: string;
   rating?: number | null;
+  rating_comment?: string | null;
 }
 
 interface SharedTrackingSnapshot {
@@ -450,6 +451,8 @@ function DoctorBookingDirectoryContent() {
   const [patientOtp, setPatientOtp] = useState('');
   const [patientOtpSent, setPatientOtpSent] = useState(false);
   const [patientOtpPurpose, setPatientOtpPurpose] = useState<'registration' | 'password_reset' | null>(null);
+  const [patientOtpCooldownUntilByPhone, setPatientOtpCooldownUntilByPhone] = useState<Record<string, number>>({});
+  const [patientOtpCooldownNow, setPatientOtpCooldownNow] = useState(() => Date.now());
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [resetPhone, setResetPhone] = useState('');
@@ -466,6 +469,37 @@ function DoctorBookingDirectoryContent() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState('');
   const [callAlertPreference, setCallAlertPreference] = useState<{ userId: string; enabled: boolean } | null>(null);
+
+  useEffect(() => {
+    if (!Object.values(patientOtpCooldownUntilByPhone).some((expiresAt) => expiresAt > patientOtpCooldownNow)) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => setPatientOtpCooldownNow(Date.now()), 1000);
+    return () => window.clearTimeout(timer);
+  }, [patientOtpCooldownUntilByPhone, patientOtpCooldownNow]);
+
+  const rememberPatientOtpCooldown = (phoneNumber: string, seconds: number) => {
+    const phoneDigits = phoneNumber.replace(/\D/g, '');
+    if (!phoneDigits || !Number.isFinite(seconds) || seconds <= 0) return;
+
+    setPatientOtpCooldownUntilByPhone((current) => ({
+      ...current,
+      [phoneDigits]: Date.now() + Math.ceil(seconds) * 1000,
+    }));
+    setPatientOtpCooldownNow(Date.now());
+  };
+
+  const getPatientOtpCooldownSeconds = (phoneNumber: string) => {
+    const phoneDigits = phoneNumber.replace(/\D/g, '');
+    const expiresAt = patientOtpCooldownUntilByPhone[phoneDigits] ?? 0;
+    return Math.max(0, Math.ceil((expiresAt - patientOtpCooldownNow) / 1000));
+  };
+
+  const activePatientOtpPhone = patientOtpPurpose === 'password_reset' || showPatientResetForm
+    ? resetPhone
+    : phone;
+  const activePatientOtpCooldownSeconds = getPatientOtpCooldownSeconds(activePatientOtpPhone);
 
   const patientLoginEmail = authIdentifier.trim();
   const patientPhoneDigits = authIdentifier.replace(/\D/g, '');
@@ -868,6 +902,42 @@ function DoctorBookingDirectoryContent() {
     };
   }, [currentUser]);
 
+  const requestPatientOtp = async (
+    phoneNumber: string,
+    purpose: 'registration' | 'password_reset',
+    fallbackError: string
+  ) => {
+    const response = await fetch('/api/auth/whatsapp/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phoneNumber, purpose }),
+    });
+    const result: unknown = await response.json();
+
+    if (!response.ok) {
+      if (
+        isObjectRecord(result)
+        && typeof result.retryAfterSeconds === 'number'
+        && Number.isFinite(result.retryAfterSeconds)
+      ) {
+        const retryAfterSeconds = Math.max(1, Math.ceil(result.retryAfterSeconds));
+        rememberPatientOtpCooldown(phoneNumber, retryAfterSeconds);
+      }
+
+      const message = isObjectRecord(result) && typeof result.error === 'string'
+        ? result.error
+        : fallbackError;
+      throw new Error(message);
+    }
+
+    const resendAfterSeconds = isObjectRecord(result)
+      && typeof result.resendAfterSeconds === 'number'
+      && Number.isFinite(result.resendAfterSeconds)
+      ? Math.max(1, Math.ceil(result.resendAfterSeconds))
+      : 60;
+    rememberPatientOtpCooldown(phoneNumber, resendAfterSeconds);
+  };
+
   const handlePatientAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthLoading(true);
@@ -931,18 +1001,11 @@ function DoctorBookingDirectoryContent() {
         const referralCode = referralProgramEnabled ? patientReferralCode.trim().toUpperCase() : '';
 
         if (!patientOtpSent) {
-          const response = await fetch('/api/auth/whatsapp/send', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ phoneNumber: cleanPhone, purpose: 'registration' }),
-          });
-          const result: unknown = await response.json();
-          if (!response.ok) {
-            const message = isObjectRecord(result) && typeof result.error === 'string'
-              ? result.error
-              : 'Unable to send a verification code. Please try again.';
-            throw new Error(message);
-          }
+          await requestPatientOtp(
+            cleanPhone,
+            'registration',
+            'Unable to send a verification code. Please try again.'
+          );
           setPatientOtpPurpose('registration');
           setPatientOtpSent(true);
           setAuthNotice(`A verification code was sent to +91 ${cleanPhone}.`);
@@ -1025,6 +1088,40 @@ function DoctorBookingDirectoryContent() {
     }
   };
 
+  const handlePatientOtpResend = async () => {
+    if (!patientOtpPurpose) return;
+
+    const rawPhone = patientOtpPurpose === 'password_reset' ? resetPhone : phone;
+    const cleanPhone = rawPhone.trim().replace(/\D/g, '');
+    if (!/^[6-9]\d{9}$/.test(cleanPhone)) {
+      setAuthError('Enter a valid 10-digit mobile number.');
+      return;
+    }
+
+    setAuthLoading(true);
+    setAuthError('');
+    setAuthNotice('');
+    try {
+      await requestPatientOtp(
+        cleanPhone,
+        patientOtpPurpose,
+        patientOtpPurpose === 'registration'
+          ? 'Unable to send a verification code. Please try again.'
+          : 'Unable to send a password-reset code.'
+      );
+      setPatientOtp('');
+      setAuthNotice(
+        patientOtpPurpose === 'registration'
+          ? `A verification code was sent to +91 ${cleanPhone}.`
+          : 'If an account matches that mobile number, a WhatsApp reset code has been sent.'
+      );
+    } catch (err: unknown) {
+      setAuthError(getErrorMessage(err, 'Unable to resend the verification code.'));
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
   const handlePatientPasswordReset = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthLoading(true);
@@ -1038,18 +1135,7 @@ function DoctorBookingDirectoryContent() {
       }
 
       if (!patientOtpSent) {
-        const response = await fetch('/api/auth/whatsapp/send', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ phoneNumber: cleanPhone, purpose: 'password_reset' }),
-        });
-        const result: unknown = await response.json();
-        if (!response.ok) {
-          const message = isObjectRecord(result) && typeof result.error === 'string'
-            ? result.error
-            : 'Unable to send a password-reset code.';
-          throw new Error(message);
-        }
+        await requestPatientOtp(cleanPhone, 'password_reset', 'Unable to send a password-reset code.');
         setPatientOtpPurpose('password_reset');
         setPatientOtpSent(true);
         setAuthNotice('If an account matches that mobile number, a WhatsApp reset code has been sent.');
@@ -1196,12 +1282,30 @@ function DoctorBookingDirectoryContent() {
   // Tickets linked to the signed-in patient account for today's tracker.
   const [trackerTickets, setTrackerTickets] = useState<ConfirmedTicket[]>([]);
   const [patientsAheadByTicketId, setPatientsAheadByTicketId] = useState<Record<string, number>>({});
-  const [trackerLoading, setTrackerLoading] = useState(false);
+  const [trackerLoading, setTrackerLoading] = useState(() => urlTicketSignature !== null);
   const [trackerError, setTrackerError] = useState('');
   const trackerRequestRef = useRef(0);
   const [patientRating, setPatientRating] = useState(0);
+  const [patientFeedbackComment, setPatientFeedbackComment] = useState('');
   const [ratingSaving, setRatingSaving] = useState(false);
   const [ratingMessage, setRatingMessage] = useState('');
+  const [feedbackToast, setFeedbackToast] = useState('');
+  const [feedbackDismissedTicketIds, setFeedbackDismissedTicketIds] = useState<Record<string, true>>({});
+  const feedbackToastTimeoutRef = useRef<number | null>(null);
+  const showPatientFeedbackModal = Boolean(
+    confirmedTicket
+    && confirmedTicket.status === 'completed'
+    && confirmedTicket.rating == null
+    && currentUser?.id === confirmedTicket.patient_user_id
+    && !isSharedTicketViewer
+    && !feedbackDismissedTicketIds[confirmedTicket.id]
+  );
+
+  useEffect(() => () => {
+    if (feedbackToastTimeoutRef.current !== null) {
+      window.clearTimeout(feedbackToastTimeoutRef.current);
+    }
+  }, []);
 
   const enableCallAlerts = async () => {
     callAlertStatusRequestRef.current += 1;
@@ -2364,7 +2468,16 @@ function DoctorBookingDirectoryContent() {
     }
   };
 
-  const handlePatientRating = async (rating: number) => {
+  const dismissPatientFeedback = () => {
+    if (!confirmedTicket) return;
+    setFeedbackDismissedTicketIds((current) => ({
+      ...current,
+      [confirmedTicket.id]: true,
+    }));
+    setRatingMessage('');
+  };
+
+  const handlePatientRating = async () => {
     if (
       !confirmedTicket
       || !currentUser
@@ -2373,25 +2486,69 @@ function DoctorBookingDirectoryContent() {
       || confirmedTicket.status !== 'completed'
       || confirmedTicket.rating != null
     ) return;
+    if (patientRating < 1 || patientRating > 5) {
+      setRatingMessage('Choose a star rating before submitting.');
+      return;
+    }
 
     setRatingSaving(true);
     setRatingMessage('');
     try {
-      const { error } = await patientSupabase
+      const submittedRating = patientRating;
+      const submittedComment = patientFeedbackComment.trim();
+      const { data, error } = await patientSupabase
         .from('tickets')
-        .update({ rating })
+        .update({
+          rating: submittedRating,
+          rating_comment: submittedComment || null,
+        })
         .eq('id', confirmedTicket.id)
-        .is('rating', null);
+        .eq('patient_user_id', currentUser.id)
+        .eq('status', 'completed')
+        .is('rating', null)
+        .select('id')
+        .maybeSingle();
 
       if (error) throw error;
-      setConfirmedTicket((current) => current ? { ...current, rating } : null);
-      setRatingMessage('Thank you for rating your doctor.');
+      if (!data) throw new Error('This visit has already been rated or is not eligible for feedback.');
+
+      setConfirmedTicket((current) => current
+        ? {
+            ...current,
+            rating: submittedRating,
+            rating_comment: submittedComment || null,
+          }
+        : null);
+      setFeedbackDismissedTicketIds((current) => ({
+        ...current,
+        [confirmedTicket.id]: true,
+      }));
+      setPatientFeedbackComment('');
+      setPatientRating(0);
+      setFeedbackToast('Thank you for your feedback.');
+      if (feedbackToastTimeoutRef.current !== null) {
+        window.clearTimeout(feedbackToastTimeoutRef.current);
+      }
+      feedbackToastTimeoutRef.current = window.setTimeout(() => {
+        setFeedbackToast('');
+        feedbackToastTimeoutRef.current = null;
+      }, 3000);
     } catch (error) {
       console.error('Failed to save patient rating:', error);
-      setRatingMessage('Unable to save your rating. Please try again.');
+      setRatingMessage(getErrorMessage(error, 'Unable to save your feedback. Please try again.'));
     } finally {
       setRatingSaving(false);
     }
+  };
+
+  const reopenPatientFeedback = () => {
+    if (!confirmedTicket) return;
+    setFeedbackDismissedTicketIds((current) => {
+      const next = { ...current };
+      delete next[confirmedTicket.id];
+      return next;
+    });
+    setRatingMessage('');
   };
 
   // 6. Cancel Ticket
@@ -2747,7 +2904,7 @@ function DoctorBookingDirectoryContent() {
               </p>
               {isSharedTicketViewer && (
                 <p className="mt-3 rounded-xl bg-white/15 px-3 py-2 text-xs font-semibold text-white">
-                  Shared read-only view. Only the account that booked this token can change or cancel it.
+                  Read-only shared view. Only the booking account can manage this token.
                 </p>
               )}
               {isSharedTicketViewer && trackerError && (
@@ -2804,74 +2961,13 @@ function DoctorBookingDirectoryContent() {
                   </p>
                 </div>
               ) : confirmedTicket.status === 'completed' ? (
-                <div className="space-y-4">
-                  <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-center space-y-2">
-                    <div className="text-xs font-bold text-emerald-800 uppercase tracking-wide">
-                      Visit Complete
-                    </div>
-                    <p className="text-xs text-emerald-700 leading-relaxed">
-                      Please collect your prescription and medical receipts from the reception counter or pharmacy desk.
-                    </p>
+                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-center">
+                  <div className="text-xs font-bold uppercase tracking-wide text-emerald-800">
+                    Visit Complete
                   </div>
-
-                  <div className="overflow-hidden rounded-2xl border border-amber-200 bg-gradient-to-br from-amber-50 via-white to-orange-50 shadow-sm">
-                    <div className="border-b border-amber-100 px-4 pb-3 pt-4 text-center">
-                      <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-full bg-amber-100 text-amber-500">
-                        <Star className="h-5 w-5 fill-current" />
-                      </div>
-                      <div className="mt-2 text-sm font-black text-slate-900">
-                        How was your visit?
-                      </div>
-                      <p className="mt-1 text-xs text-slate-500">
-                        Rate your consultation with <span className="font-bold text-slate-700">{confirmedTicket.doctor_name}</span>
-                      </p>
-                    </div>
-                    {confirmedTicket.rating == null ? (
-                      <div className="px-4 pb-4 pt-3">
-                        <div className="flex justify-center gap-1.5" role="radiogroup" aria-label="Rate your doctor">
-                          {[1, 2, 3, 4, 5].map((rating) => (
-                            <button
-                              key={rating}
-                              type="button"
-                              role="radio"
-                              aria-label={`${rating} out of 5 stars`}
-                              aria-checked={patientRating === rating}
-                              disabled={ratingSaving}
-                              onClick={() => {
-                                setPatientRating(rating);
-                                void handlePatientRating(rating);
-                              }}
-                              className={`flex h-12 w-12 flex-col items-center justify-center rounded-xl border transition-all ${
-                                patientRating >= rating
-                                  ? 'border-amber-300 bg-amber-100 text-amber-500 shadow-sm'
-                                  : 'border-slate-200 bg-white text-slate-300 hover:border-amber-300 hover:bg-amber-50 hover:text-amber-400'
-                              } disabled:cursor-not-allowed disabled:opacity-60`}
-                            >
-                              <Star className="h-5 w-5 fill-current" />
-                              <span className="mt-0.5 text-[9px] font-bold">{rating}</span>
-                            </button>
-                          ))}
-                        </div>
-                        <p className="mt-3 text-center text-[11px] font-medium text-slate-400">
-                          {ratingSaving ? 'Saving your rating...' : 'Tap a star to submit'}
-                        </p>
-                      </div>
-                    ) : (
-                      <div className="px-4 pb-4 pt-3 text-center">
-                        <div className="flex justify-center gap-1 text-amber-400">
-                          {[1, 2, 3, 4, 5].map((star) => (
-                            <Star key={star} className={`h-5 w-5 ${star <= confirmedTicket.rating! ? 'fill-current' : 'text-slate-200'}`} />
-                          ))}
-                        </div>
-                        <p className="mt-2 text-xs font-bold text-emerald-700">
-                          Thank you. You rated this visit {confirmedTicket.rating}/5.
-                        </p>
-                      </div>
-                    )}
-                    {ratingMessage && !confirmedTicket.rating && (
-                      <p className="px-4 pb-3 text-center text-xs font-semibold text-rose-700">{ratingMessage}</p>
-                    )}
-                  </div>
+                  <p className="mt-2 text-xs leading-relaxed text-emerald-700">
+                    Please collect your prescription and medical receipts from the reception counter or pharmacy desk.
+                  </p>
                 </div>
               ) : (
                 <div className="grid grid-cols-2 gap-3 p-4 rounded-2xl bg-blue-50/60 border border-blue-100">
@@ -2989,7 +3085,13 @@ function DoctorBookingDirectoryContent() {
                 <button
                   type="button"
                   onClick={() => window.print()}
-                  className="w-full px-2 py-3 rounded-xl bg-slate-900 hover:bg-black text-white text-xs font-bold transition-colors cursor-pointer flex items-center justify-center gap-2"
+                  className={`w-full px-2 py-3 rounded-xl bg-slate-900 hover:bg-black text-white text-xs font-bold transition-colors cursor-pointer flex items-center justify-center gap-2 ${
+                    isSharedTicketViewer ? 'mx-auto max-w-xs' : ''
+                  } ${
+                    isSharedTicketViewer && confirmedTicket.status === 'waiting'
+                      ? 'col-span-2 justify-self-center'
+                      : ''
+                  }`}
                 >
                   <Printer className="w-4 h-4" />
                   <span>Print / Save Slip</span>
@@ -3009,6 +3111,19 @@ function DoctorBookingDirectoryContent() {
                     <span>{cancelLoading ? 'Cancelling Token...' : 'Cancel My Booking'}</span>
                   </button>
                 )}
+
+                {confirmedTicket.status === 'completed'
+                  && confirmedTicket.rating == null
+                  && !isSharedTicketViewer
+                  && currentUser?.id === confirmedTicket.patient_user_id && (
+                    <button
+                      type="button"
+                      onClick={reopenPatientFeedback}
+                      className="w-full rounded-xl py-2 text-center text-xs font-bold text-amber-700 transition-colors hover:bg-amber-50"
+                    >
+                      Rate Visit
+                    </button>
+                  )}
 
                 <button
                   type="button"
@@ -3033,6 +3148,118 @@ function DoctorBookingDirectoryContent() {
               </div>
 
             </div>
+          </div>
+        )}
+
+        {showPatientFeedbackModal && confirmedTicket && (
+          <div
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/60 p-4"
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) dismissPatientFeedback();
+            }}
+          >
+            <section
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="patient-feedback-title"
+              aria-describedby="patient-feedback-description"
+              onKeyDown={(event) => {
+                if (event.key === 'Escape' && !ratingSaving) dismissPatientFeedback();
+              }}
+              className="relative max-h-[90vh] w-full max-w-md overflow-y-auto rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl sm:p-8"
+            >
+              <button
+                type="button"
+                aria-label="Close feedback"
+                disabled={ratingSaving}
+                onClick={dismissPatientFeedback}
+                className="absolute right-4 top-4 flex h-9 w-9 items-center justify-center rounded-full text-2xl leading-none text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 disabled:opacity-50"
+              >
+                <span aria-hidden="true">×</span>
+              </button>
+
+              <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-100 text-amber-500">
+                <Star className="h-6 w-6 fill-current" />
+              </div>
+              <h2 id="patient-feedback-title" className="text-center text-xl font-black text-slate-900">
+                How was your visit?
+              </h2>
+              <p id="patient-feedback-description" className="mt-2 text-center text-sm text-slate-600">
+                Rate your consultation with Dr. <span className="font-bold text-slate-800">{confirmedTicket.doctor_name}</span>
+              </p>
+
+              <div className="mt-6 flex justify-center gap-2" role="radiogroup" aria-label="Rate your consultation">
+                {[1, 2, 3, 4, 5].map((rating) => (
+                  <button
+                    key={rating}
+                    type="button"
+                    role="radio"
+                    aria-label={`${rating} out of 5 stars`}
+                    aria-checked={patientRating === rating}
+                    disabled={ratingSaving}
+                    onClick={() => {
+                      setPatientRating(rating);
+                      setRatingMessage('');
+                    }}
+                    className={`flex h-12 w-12 items-center justify-center rounded-xl border transition ${
+                      patientRating >= rating
+                        ? 'border-amber-300 bg-amber-100 text-amber-500'
+                        : 'border-slate-200 bg-white text-slate-300 hover:border-amber-300 hover:bg-amber-50 hover:text-amber-400'
+                    } disabled:cursor-not-allowed disabled:opacity-60`}
+                  >
+                    <Star className="h-6 w-6 fill-current" />
+                  </button>
+                ))}
+              </div>
+
+              <label htmlFor="patient-feedback-comment" className="mt-6 block text-sm font-bold text-slate-700">
+                Comments <span className="font-normal text-slate-400">(optional)</span>
+              </label>
+              <textarea
+                id="patient-feedback-comment"
+                rows={4}
+                maxLength={2000}
+                value={patientFeedbackComment}
+                onChange={(event) => setPatientFeedbackComment(event.target.value)}
+                placeholder="Share any comments about your visit (optional)..."
+                disabled={ratingSaving}
+                className="mt-2 w-full resize-y rounded-xl border border-slate-300 bg-slate-50 px-3.5 py-3 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-blue-500 disabled:opacity-60"
+              />
+
+              {ratingMessage && (
+                <p role="alert" className="mt-3 text-center text-xs font-semibold text-rose-700">
+                  {ratingMessage}
+                </p>
+              )}
+
+              <button
+                type="button"
+                disabled={ratingSaving || patientRating === 0}
+                onClick={() => void handlePatientRating()}
+                className="mt-5 w-full rounded-xl bg-blue-600 px-4 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {ratingSaving ? 'Submitting...' : 'Submit Feedback'}
+              </button>
+              <button
+                type="button"
+                disabled={ratingSaving}
+                onClick={dismissPatientFeedback}
+                className="mt-2 w-full rounded-xl px-4 py-2.5 text-sm font-semibold text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 disabled:opacity-50"
+              >
+                Maybe Later
+              </button>
+            </section>
+          </div>
+        )}
+
+        {feedbackToast && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="fixed bottom-6 left-1/2 z-[110] flex -translate-x-1/2 items-center gap-2 rounded-full bg-emerald-700 px-5 py-3 text-sm font-semibold text-white shadow-xl"
+          >
+            <CheckCircle2 className="h-4 w-4" />
+            {feedbackToast}
           </div>
         )}
 
@@ -3145,7 +3372,7 @@ function DoctorBookingDirectoryContent() {
           && urlTicketSignature !== null
           && (
             <div className="mx-auto max-w-md rounded-3xl border border-slate-200 bg-white px-6 py-10 text-center shadow-sm">
-              {trackerLoading ? (
+              {trackerLoading || !trackerError ? (
                 <>
                   <div className="mx-auto mb-3 h-8 w-8 animate-spin rounded-full border-4 border-blue-600 border-t-transparent" />
                   <p className="text-sm font-bold text-slate-700">Loading shared token...</p>
@@ -4060,6 +4287,18 @@ function DoctorBookingDirectoryContent() {
                   >
                     {patientOtpPurpose === 'registration' ? 'Change registration details' : 'Change mobile number'}
                   </button>
+                  <button
+                    type="button"
+                    disabled={authLoading || activePatientOtpCooldownSeconds > 0}
+                    onClick={() => void handlePatientOtpResend()}
+                    className="ml-3 mt-2 text-xs font-semibold text-blue-600 hover:text-blue-700 hover:underline disabled:cursor-not-allowed disabled:text-slate-400 disabled:no-underline"
+                  >
+                    {authLoading
+                      ? 'Sending...'
+                      : activePatientOtpCooldownSeconds > 0
+                        ? `Resend code in ${activePatientOtpCooldownSeconds}s`
+                        : 'Resend code'}
+                  </button>
                 </div>
               )}
 
@@ -4107,11 +4346,20 @@ function DoctorBookingDirectoryContent() {
                 </div>
               )}
 
+              {!patientOtpSent
+                && (showPatientResetForm || authTab === 'register')
+                && activePatientOtpCooldownSeconds > 0 && (
+                  <p role="status" className="text-xs font-medium text-slate-500">
+                    You can request another code in {activePatientOtpCooldownSeconds}s.
+                  </p>
+                )}
+
               {showPatientResetForm ? (
                 <button
                   type="submit"
                   disabled={
                     authLoading
+                    || (!patientOtpSent && activePatientOtpCooldownSeconds > 0)
                     || (patientOtpSent
                       ? !patientOtp || !resetPassword
                       : !/^[6-9]\d{9}$/.test(resetPhone.replace(/\D/g, '')))
@@ -4125,7 +4373,11 @@ function DoctorBookingDirectoryContent() {
               ) : authTab === 'register' ? (
                 <button
                   type="submit"
-                  disabled={authLoading || (patientOtpSent && !patientOtp)}
+                  disabled={
+                    authLoading
+                    || (!patientOtpSent && activePatientOtpCooldownSeconds > 0)
+                    || (patientOtpSent && !patientOtp)
+                  }
                   className="w-full mt-2 py-3.5 rounded-xl shadow-md text-xs font-black text-white bg-blue-600 hover:bg-blue-700 active:scale-95 disabled:opacity-50 transition-all cursor-pointer"
                 >
                   {authLoading
