@@ -13,6 +13,7 @@ import {
 import { findPatientPhoneAccount, isPatientPhoneAccount } from '@/lib/server/patient-phone-account';
 
 const META_GRAPH_API_VERSION = 'v27.0';
+const OTP_RESEND_COOLDOWN_SECONDS = 60;
 
 const jsonResponse = (body: Record<string, unknown>, status = 200) =>
   Response.json(body, {
@@ -108,7 +109,11 @@ export async function POST(request: Request) {
       return jsonResponse({ error: 'Unable to prepare a password-reset code.' }, 500);
     }
     if (ambiguous || !account) {
-      return jsonResponse({ success: true, expiresInSeconds: 180 });
+      return jsonResponse({
+        success: true,
+        expiresInSeconds: 180,
+        resendAfterSeconds: OTP_RESEND_COOLDOWN_SECONDS,
+      });
     }
     if (account) {
       try {
@@ -133,7 +138,10 @@ export async function POST(request: Request) {
   }
   if (!reserved) {
     return jsonResponse(
-      { error: 'Please wait one minute before requesting another OTP.' },
+      {
+        error: `Please wait ${OTP_RESEND_COOLDOWN_SECONDS} seconds before requesting another OTP.`,
+        retryAfterSeconds: OTP_RESEND_COOLDOWN_SECONDS,
+      },
       429
     );
   }
@@ -148,12 +156,19 @@ export async function POST(request: Request) {
   };
 
   if (useMockOtp) {
-    return jsonResponse({ success: true, expiresInSeconds: 180 });
+    return jsonResponse({
+      success: true,
+      expiresInSeconds: 180,
+      resendAfterSeconds: OTP_RESEND_COOLDOWN_SECONDS,
+    });
   }
 
   if (!metaCredentials) {
     await releaseOtp();
-    return jsonResponse({ error: 'WhatsApp OTP service is not configured.' }, 503);
+    return jsonResponse({
+      error: 'WhatsApp OTP service is not configured.',
+      retryAfterSeconds: OTP_RESEND_COOLDOWN_SECONDS,
+    }, 503);
   }
 
   try {
@@ -213,13 +228,21 @@ export async function POST(request: Request) {
           : metaError?.code
             ? `Unable to send the WhatsApp OTP (Meta error ${metaError.code}).`
             : 'Unable to send the WhatsApp OTP.',
+        retryAfterSeconds: OTP_RESEND_COOLDOWN_SECONDS,
       }, 502);
     }
   } catch (error) {
     console.error('Meta WhatsApp API request failed:', error);
     await releaseOtp();
-    return jsonResponse({ error: 'Unable to send the WhatsApp OTP.' }, 502);
+    return jsonResponse({
+      error: 'Unable to send the WhatsApp OTP.',
+      retryAfterSeconds: OTP_RESEND_COOLDOWN_SECONDS,
+    }, 502);
   }
 
-  return jsonResponse({ success: true, expiresInSeconds: 180 });
+  return jsonResponse({
+    success: true,
+    expiresInSeconds: 180,
+    resendAfterSeconds: OTP_RESEND_COOLDOWN_SECONDS,
+  });
 }

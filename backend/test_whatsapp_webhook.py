@@ -99,7 +99,14 @@ class WhatsAppWebhookTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"success": True, "expiresInSeconds": 180})
+        self.assertEqual(
+            response.json(),
+            {
+                "success": True,
+                "expiresInSeconds": 180,
+                "resendAfterSeconds": 60,
+            },
+        )
         self.assertNotIn(otp_code, response.text)
         self.assertEqual(len(requests), 2)
 
@@ -176,6 +183,7 @@ class WhatsAppWebhookTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.headers["retry-after"], "60")
         self.assertEqual(len(requests), 1)
 
     async def test_send_otp_releases_reserved_code_when_meta_rejects(self) -> None:
@@ -216,6 +224,7 @@ class WhatsAppWebhookTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.headers["retry-after"], "60")
         release_request = next(request for request in requests if request.method == "DELETE")
         self.assertEqual(
             release_request.url.params["purpose"],
