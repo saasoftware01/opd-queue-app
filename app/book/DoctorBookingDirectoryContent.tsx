@@ -449,8 +449,11 @@ function DoctorBookingDirectoryContent() {
   const [authIdentifier, setAuthIdentifier] = useState('');
   const [patientOtp, setPatientOtp] = useState('');
   const [patientOtpSent, setPatientOtpSent] = useState(false);
+  const [patientOtpPurpose, setPatientOtpPurpose] = useState<'registration' | 'password_reset' | null>(null);
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
+  const [resetPhone, setResetPhone] = useState('');
+  const [resetPassword, setResetPassword] = useState('');
   const [patientReferralCode, setPatientReferralCode] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState('');
@@ -478,8 +481,6 @@ function DoctorBookingDirectoryContent() {
   const isPatientMobile =
     /^[6-9]\d{9}$/.test(patientPhoneDigits) &&
     /^\+?[\d\s()-]+$/.test(authIdentifier.trim());
-  const patientAuthPhone = `+91${patientPhoneDigits}`;
-
   const fetchReferralSystemSetting = useCallback(async () => {
     const response = await fetch('/api/platform/referral-settings', { cache: 'no-store' });
     const result: unknown = await response.json();
@@ -875,20 +876,102 @@ function DoctorBookingDirectoryContent() {
 
     try {
       if (authTab === 'login') {
-        const { data, error } = await patientSupabase.auth.signInWithPassword({
-          email: authIdentifier.trim(),
-          password: authPassword,
-        });
-        if (error) throw error;
-        if (!data.user) throw new Error('Unable to sign in. Please try again.');
-        applyAuthenticatedUser(data.user);
+        let sessionData: Awaited<ReturnType<typeof patientSupabase.auth.setSession>>['data'];
+        if (isPatientEmail) {
+          const { data, error } = await patientSupabase.auth.signInWithPassword({
+            email: authIdentifier.trim(),
+            password: authPassword,
+          });
+          if (error) throw error;
+          if (!data.session) throw new Error('Unable to sign in. Please try again.');
+          sessionData = data;
+        } else if (isPatientMobile) {
+          const response = await fetch('/api/auth/patient/password', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ phoneNumber: patientPhoneDigits, password: authPassword }),
+          });
+          const result: unknown = await response.json();
+          if (!response.ok) {
+            const message = isObjectRecord(result) && typeof result.error === 'string'
+              ? result.error
+              : 'Unable to sign in. Please check your mobile number and password.';
+            throw new Error(message);
+          }
+          if (
+            !isObjectRecord(result)
+            || !isObjectRecord(result.session)
+            || typeof result.session.access_token !== 'string'
+            || typeof result.session.refresh_token !== 'string'
+          ) {
+            throw new Error('The sign-in response was invalid.');
+          }
+          const { data, error } = await patientSupabase.auth.setSession({
+            access_token: result.session.access_token,
+            refresh_token: result.session.refresh_token,
+          });
+          if (error) throw error;
+          sessionData = data;
+        } else {
+          throw new Error('Enter a valid email address or 10-digit mobile number.');
+        }
+
+        if (!sessionData.user) throw new Error('Unable to sign in. Please try again.');
+        applyAuthenticatedUser(sessionData.user);
       } else {
         if (!isValidPassword(authPassword)) throw new Error(PASSWORD_REQUIREMENT);
         const cleanPhone = phone.trim().replace(/\D/g, '');
         if (!patientName.trim()) throw new Error('Please enter your full name.');
-        if (cleanPhone.length !== 10) throw new Error('Please enter a valid 10-digit mobile number.');
+        if (!/^[6-9]\d{9}$/.test(cleanPhone)) {
+          throw new Error('Please enter a valid 10-digit mobile number.');
+        }
+        if (!authEmail.trim()) throw new Error('Please enter your email address.');
+
         const { referralProgramEnabled } = await refreshReferralSystemSetting();
-        const referralCode = patientReferralCode.trim().toUpperCase();
+        const referralCode = referralProgramEnabled ? patientReferralCode.trim().toUpperCase() : '';
+
+        if (!patientOtpSent) {
+          const response = await fetch('/api/auth/whatsapp/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ phoneNumber: cleanPhone, purpose: 'registration' }),
+          });
+          const result: unknown = await response.json();
+          if (!response.ok) {
+            const message = isObjectRecord(result) && typeof result.error === 'string'
+              ? result.error
+              : 'Unable to send a verification code. Please try again.';
+            throw new Error(message);
+          }
+          setPatientOtpPurpose('registration');
+          setPatientOtpSent(true);
+          setAuthNotice(`A verification code was sent to +91 ${cleanPhone}.`);
+          return;
+        }
+        if (patientOtpPurpose !== 'registration') {
+          throw new Error('Restart registration to request a verification code.');
+        }
+
+        const verifyResponse = await fetch('/api/auth/whatsapp/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            purpose: 'registration',
+            phoneNumber: cleanPhone,
+            otpCode: patientOtp.trim(),
+            email: authEmail.trim(),
+            password: authPassword,
+            fullName: patientName.trim(),
+            referred_by: referralCode,
+          }),
+        });
+        const verifyResult: unknown = await verifyResponse.json();
+        if (!verifyResponse.ok) {
+          const message = isObjectRecord(verifyResult) && typeof verifyResult.error === 'string'
+            ? verifyResult.error
+            : 'Unable to verify your mobile number.';
+          throw new Error(message);
+        }
 
         const { data, error } = await patientSupabase.auth.signUp({
           email: authEmail.trim(),
@@ -898,7 +981,7 @@ function DoctorBookingDirectoryContent() {
               account_type: 'patient',
               full_name: patientName.trim(),
               phone: cleanPhone,
-              referred_by: referralProgramEnabled && referralCode ? referralCode : null,
+              referred_by: referralCode || null,
             },
           },
         });
@@ -910,6 +993,9 @@ function DoctorBookingDirectoryContent() {
 
         if (!data.session) {
           setAuthPassword('');
+          setPatientOtp('');
+          setPatientOtpSent(false);
+          setPatientOtpPurpose(null);
           setAuthNotice('Account created. Check your email to confirm your account, then sign in to continue.');
           return;
         }
@@ -922,6 +1008,7 @@ function DoctorBookingDirectoryContent() {
       setPatientReferralCode('');
       setPatientOtp('');
       setPatientOtpSent(false);
+      setPatientOtpPurpose(null);
       setShowAuthModal(false);
     } catch (err: unknown) {
       setAuthError(getErrorMessage(err, 'Authentication failed. Please check your details.'));
@@ -930,99 +1017,11 @@ function DoctorBookingDirectoryContent() {
     }
   };
 
-  const handlePatientSendOtp = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setAuthLoading(true);
-    setAuthError('');
-    setAuthNotice('');
-
-    try {
-      const response = await fetch('/api/auth/whatsapp/send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phoneNumber: patientAuthPhone }),
-      });
-      const result: unknown = await response.json();
-      if (!response.ok) {
-        const message = isObjectRecord(result) && typeof result.error === 'string'
-          ? result.error
-          : 'Unable to send a WhatsApp OTP. Please try again.';
-        throw new Error(message);
-      }
-      setPatientOtpSent(true);
-    } catch (err: unknown) {
-      setAuthError(getErrorMessage(err, 'Unable to send a WhatsApp OTP. Please try again.'));
-    } finally {
-      setAuthLoading(false);
-    }
-  };
-
-  const handlePatientVerifyOtp = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setAuthLoading(true);
-    setAuthError('');
-    setAuthNotice('');
-
-    try {
-      const { referralProgramEnabled } = await refreshReferralSystemSetting();
-      const response = await fetch('/api/auth/whatsapp/verify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          phoneNumber: patientAuthPhone,
-          otpCode: patientOtp.trim(),
-          referred_by: referralProgramEnabled ? patientReferralCode.trim().toUpperCase() : '',
-        }),
-      });
-      const result: unknown = await response.json();
-      if (!response.ok) {
-        const message = isObjectRecord(result) && typeof result.error === 'string'
-          ? result.error
-          : 'Unable to verify OTP. Please try again.';
-        throw new Error(message);
-      }
-      if (
-        !isObjectRecord(result) ||
-        !isObjectRecord(result.session) ||
-        typeof result.session.access_token !== 'string' ||
-        typeof result.session.refresh_token !== 'string'
-      ) {
-        throw new Error('The login response was invalid. Please try again.');
-      }
-
-      const { data, error } = await patientSupabase.auth.setSession({
-        access_token: result.session.access_token,
-        refresh_token: result.session.refresh_token,
-      });
-      if (error) throw error;
-      if (!data.user) throw new Error('Unable to sign in. Please try again.');
-
-      applyAuthenticatedUser(data.user);
-      setAuthIdentifier('');
-      setPatientReferralCode('');
-      setPatientOtp('');
-      setPatientOtpSent(false);
-      setShowAuthModal(false);
-    } catch (err: unknown) {
-      setAuthError(getErrorMessage(err, 'Unable to verify OTP. Please try again.'));
-    } finally {
-      setAuthLoading(false);
-    }
-  };
-
   const handlePatientFormSubmit = async (e: React.FormEvent) => {
     if (showPatientResetForm) {
       await handlePatientPasswordReset(e);
-    } else if (authTab === 'register') {
-      await handlePatientAuth(e);
-    } else if (patientOtpSent) {
-      await handlePatientVerifyOtp(e);
-    } else if (isPatientEmail) {
-      await handlePatientAuth(e);
-    } else if (isPatientMobile) {
-      await handlePatientSendOtp(e);
     } else {
-      e.preventDefault();
+      await handlePatientAuth(e);
     }
   };
 
@@ -1033,11 +1032,66 @@ function DoctorBookingDirectoryContent() {
     setAuthNotice('');
 
     try {
-      const { error } = await patientSupabase.auth.resetPasswordForEmail(authEmail.trim());
-      if (error) throw error;
-      setAuthNotice('If an account exists for this email, a password reset link has been sent. Check your inbox.');
+      const cleanPhone = resetPhone.trim().replace(/\D/g, '');
+      if (!/^[6-9]\d{9}$/.test(cleanPhone)) {
+        throw new Error('Enter the registered 10-digit mobile number.');
+      }
+
+      if (!patientOtpSent) {
+        const response = await fetch('/api/auth/whatsapp/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phoneNumber: cleanPhone, purpose: 'password_reset' }),
+        });
+        const result: unknown = await response.json();
+        if (!response.ok) {
+          const message = isObjectRecord(result) && typeof result.error === 'string'
+            ? result.error
+            : 'Unable to send a password-reset code.';
+          throw new Error(message);
+        }
+        setPatientOtpPurpose('password_reset');
+        setPatientOtpSent(true);
+        setAuthNotice('If an account matches that mobile number, a WhatsApp reset code has been sent.');
+        return;
+      }
+
+      if (patientOtpPurpose !== 'password_reset') {
+        throw new Error('Request a new password-reset code.');
+      }
+      if (!/^\d{6}$/.test(patientOtp.trim())) {
+        throw new Error('Enter the 6-digit verification code.');
+      }
+      if (!isValidPassword(resetPassword)) throw new Error(PASSWORD_REQUIREMENT);
+
+      const response = await fetch('/api/auth/whatsapp/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          purpose: 'password_reset',
+          phoneNumber: cleanPhone,
+          otpCode: patientOtp.trim(),
+          password: resetPassword,
+        }),
+      });
+      const result: unknown = await response.json();
+      if (!response.ok) {
+        const message = isObjectRecord(result) && typeof result.error === 'string'
+          ? result.error
+          : 'Unable to reset the password.';
+        throw new Error(message);
+      }
+
+      setAuthIdentifier(cleanPhone);
+      setAuthPassword('');
+      setResetPassword('');
+      setPatientOtp('');
+      setPatientOtpSent(false);
+      setPatientOtpPurpose(null);
+      setShowPatientResetForm(false);
+      setAuthNotice('Password reset successfully. Sign in with your new password.');
     } catch (err: unknown) {
-      setAuthError(getErrorMessage(err, 'Unable to send a password reset email.'));
+      setAuthError(getErrorMessage(err, 'Unable to reset the password.'));
     } finally {
       setAuthLoading(false);
     }
@@ -3760,19 +3814,19 @@ function DoctorBookingDirectoryContent() {
               <div>
                 <h3 id="patient-auth-title" className="text-lg font-black text-slate-900">
                   {showPatientResetForm
-                    ? 'Reset Patient Password'
-                    : patientOtpSent
-                      ? 'Verify Patient OTP'
+                    ? patientOtpSent ? 'Verify Password Reset' : 'Reset Patient Password'
+                    : patientOtpSent && patientOtpPurpose === 'registration'
+                      ? 'Verify Mobile Number'
                       : authTab === 'login'
                         ? 'Patient Login'
                         : 'Create Patient Account'}
                 </h3>
                 <p className="text-xs text-slate-500">
                   {showPatientResetForm
-                    ? 'We’ll email you a secure password reset link.'
-                    : patientOtpSent
-                      ? `Enter the WhatsApp code sent to ${patientAuthPhone}.`
-                      : 'Sign in to book tokens and track live queues'}
+                    ? 'Reset your password using a code sent to your registered mobile number.'
+                    : patientOtpSent && patientOtpPurpose === 'registration'
+                      ? `Enter the WhatsApp code sent to +91 ${phone.replace(/\D/g, '')}.`
+                      : 'Sign in with your registered email or mobile number and password.'}
                 </p>
               </div>
               <button
@@ -3803,6 +3857,7 @@ function DoctorBookingDirectoryContent() {
                   setShowPatientResetForm(false);
                   setPatientOtp('');
                   setPatientOtpSent(false);
+                  setPatientOtpPurpose(null);
                   setAuthError('');
                   setAuthNotice('');
                 }}
@@ -3819,6 +3874,7 @@ function DoctorBookingDirectoryContent() {
                   setShowPatientResetForm(false);
                   setPatientOtp('');
                   setPatientOtpSent(false);
+                  setPatientOtpPurpose(null);
                   setAuthError('');
                   setAuthNotice('');
                 }}
@@ -3896,7 +3952,7 @@ function DoctorBookingDirectoryContent() {
                 </>
               )}
 
-              {(showPatientResetForm || authTab === 'register') && (
+              {!showPatientResetForm && authTab === 'register' && (
                 <div>
                   <label htmlFor="patient-auth-email" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
                     Email Address *
@@ -3939,6 +3995,8 @@ function DoctorBookingDirectoryContent() {
                       }
                       setAuthError('');
                       setAuthNotice('');
+                      setPatientOtpPurpose(null);
+                      setResetPassword('');
                     }}
                     placeholder="Email or 10-digit mobile number"
                     className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-600 focus:outline-hidden"
@@ -3948,33 +4006,34 @@ function DoctorBookingDirectoryContent() {
                       {patientPhoneLengthError}
                     </p>
                   )}
-                  {!isPatientEmail && referralSystemEnabled && (
-                    <div className="mt-3">
-                      <label htmlFor="patient-login-referral-code" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                        Referral Code (Optional)
-                      </label>
-                      <input
-                        id="patient-login-referral-code"
-                        type="text"
-                        autoComplete="off"
-                        maxLength={10}
-                        value={patientReferralCode}
-                        onChange={(e) => setPatientReferralCode(e.target.value.replace(/[^a-zA-Z0-9]/g, '').slice(0, 10).toUpperCase())}
-                        placeholder="Enter a referral code if you have one"
-                        className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-600 focus:outline-hidden"
-                      />
-                      <p className="mt-1 text-[10px] text-slate-500">
-                        Leave blank if you do not have a referral code.
-                      </p>
-                    </div>
-                  )}
                 </div>
               )}
 
-              {!showPatientResetForm && authTab === 'login' && patientOtpSent && (
+              {showPatientResetForm && (
+                <div>
+                  <label htmlFor="patient-reset-phone" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                    Registered Mobile Number *
+                  </label>
+                  <input
+                    id="patient-reset-phone"
+                    type="tel"
+                    required
+                    maxLength={10}
+                    autoComplete="tel"
+                    inputMode="numeric"
+                    value={resetPhone}
+                    disabled={patientOtpSent}
+                    onChange={(e) => setResetPhone(e.target.value.replace(/\D/g, '').slice(0, 10))}
+                    placeholder="Enter your registered 10-digit mobile number"
+                    className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-600 focus:outline-hidden disabled:opacity-60"
+                  />
+                </div>
+              )}
+
+              {patientOtpSent && patientOtpPurpose && (
                 <div>
                   <label htmlFor="patient-auth-otp" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                    One-time password
+                    WhatsApp verification code *
                   </label>
                   <input
                     id="patient-auth-otp"
@@ -3982,30 +4041,29 @@ function DoctorBookingDirectoryContent() {
                     required
                     autoComplete="one-time-code"
                     inputMode="numeric"
+                    maxLength={6}
                     value={patientOtp}
-                    onChange={(e) => {
-                      setPatientOtp(e.target.value.replace(/\D/g, ''));
-                      setAuthError('');
-                    }}
-                    placeholder="Enter OTP"
+                    onChange={(e) => setPatientOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    placeholder="Enter 6-digit code"
                     className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm tracking-[0.3em] text-slate-900 placeholder:tracking-normal focus:bg-white focus:ring-2 focus:ring-blue-600 focus:outline-hidden"
                   />
                   <button
                     type="button"
                     onClick={() => {
                       setPatientOtpSent(false);
+                      setPatientOtpPurpose(null);
                       setPatientOtp('');
                       setAuthError('');
                       setAuthNotice('');
                     }}
                     className="mt-2 text-xs font-semibold text-blue-600 hover:text-blue-700 hover:underline"
                   >
-                    Change mobile number
+                    {patientOtpPurpose === 'registration' ? 'Change registration details' : 'Change mobile number'}
                   </button>
                 </div>
               )}
 
-              {!showPatientResetForm && (authTab === 'register' || (authTab === 'login' && isPatientEmail)) && <div>
+              {!showPatientResetForm && (authTab === 'register' || authTab === 'login') && <div>
                 <label htmlFor="patient-auth-password" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
                   Password *
                 </label>
@@ -4027,50 +4085,71 @@ function DoctorBookingDirectoryContent() {
                 )}
               </div>}
 
-              {showPatientResetForm || authTab === 'register' ? (
+              {showPatientResetForm && patientOtpSent && (
+                <div>
+                  <label htmlFor="patient-reset-new-password" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                    New Password *
+                  </label>
+                  <input
+                    id="patient-reset-new-password"
+                    type="password"
+                    required
+                    autoComplete="new-password"
+                    minLength={8}
+                    pattern={PASSWORD_PATTERN}
+                    title={PASSWORD_REQUIREMENT}
+                    value={resetPassword}
+                    onChange={(e) => setResetPassword(e.target.value)}
+                    placeholder="Create a strong password"
+                    className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-600 focus:outline-hidden"
+                  />
+                  <p className="mt-1 text-[10px] leading-4 text-slate-500">{PASSWORD_REQUIREMENT}</p>
+                </div>
+              )}
+
+              {showPatientResetForm ? (
                 <button
                   type="submit"
-                  disabled={authLoading}
+                  disabled={
+                    authLoading
+                    || (patientOtpSent
+                      ? !patientOtp || !resetPassword
+                      : !/^[6-9]\d{9}$/.test(resetPhone.replace(/\D/g, '')))
+                  }
                   className="w-full mt-2 py-3.5 rounded-xl shadow-md text-xs font-black text-white bg-blue-600 hover:bg-blue-700 active:scale-95 disabled:opacity-50 transition-all cursor-pointer"
                 >
                   {authLoading
-                    ? showPatientResetForm ? 'Sending reset link...' : 'Processing...'
-                    : showPatientResetForm ? 'Send reset link' : 'Register & Continue'}
+                    ? patientOtpSent ? 'Resetting password...' : 'Sending reset code...'
+                    : patientOtpSent ? 'Reset Password' : 'Send Reset Code'}
                 </button>
-              ) : patientOtpSent ? (
+              ) : authTab === 'register' ? (
                 <button
                   type="submit"
-                  disabled={authLoading || !patientOtp}
+                  disabled={authLoading || (patientOtpSent && !patientOtp)}
                   className="w-full mt-2 py-3.5 rounded-xl shadow-md text-xs font-black text-white bg-blue-600 hover:bg-blue-700 active:scale-95 disabled:opacity-50 transition-all cursor-pointer"
                 >
-                  {authLoading ? 'Verifying...' : 'Verify OTP'}
+                  {authLoading
+                    ? patientOtpSent ? 'Verifying and registering...' : 'Sending verification code...'
+                    : patientOtpSent ? 'Verify & Register' : 'Send Verification Code'}
                 </button>
-              ) : isPatientEmail ? (
+              ) : (
                 <button
                   type="submit"
-                  disabled={authLoading}
+                  disabled={authLoading || (!isPatientEmail && !isPatientMobile) || !authPassword}
                   className="w-full mt-2 py-3.5 rounded-xl shadow-md text-xs font-black text-white bg-blue-600 hover:bg-blue-700 active:scale-95 disabled:opacity-50 transition-all cursor-pointer"
                 >
                   {authLoading ? 'Signing in...' : 'Login with Password'}
                 </button>
-              ) : isPatientMobile ? (
-                <button
-                  type="submit"
-                  disabled={authLoading}
-                  className="w-full mt-2 py-3.5 rounded-xl shadow-md text-xs font-black text-white bg-blue-600 hover:bg-blue-700 active:scale-95 disabled:opacity-50 transition-all cursor-pointer"
-                >
-                  {authLoading ? 'Sending OTP...' : 'Send WhatsApp OTP'}
-                </button>
-              ) : (
-                <p className="text-center text-xs text-slate-500">
-                  Enter your email or a 10-digit Indian mobile number.
-                </p>
               )}
               {showPatientResetForm ? (
                 <button
                   type="button"
                   onClick={() => {
                     setShowPatientResetForm(false);
+                    setPatientOtpSent(false);
+                    setPatientOtpPurpose(null);
+                    setPatientOtp('');
+                    setResetPassword('');
                     setAuthError('');
                     setAuthNotice('');
                   }}
@@ -4078,11 +4157,15 @@ function DoctorBookingDirectoryContent() {
                 >
                   Back to patient login
                 </button>
-              ) : authTab === 'login' && isPatientEmail && !patientOtpSent && (
+              ) : authTab === 'login' && !patientOtpSent && (
                 <button
                   type="button"
                   onClick={() => {
-                    setAuthEmail(authIdentifier.trim());
+                    setResetPhone(isPatientMobile ? patientPhoneDigits : '');
+                    setResetPassword('');
+                    setPatientOtp('');
+                    setPatientOtpSent(false);
+                    setPatientOtpPurpose(null);
                     setShowPatientResetForm(true);
                     setAuthError('');
                     setAuthNotice('');

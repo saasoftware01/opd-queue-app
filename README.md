@@ -37,12 +37,17 @@ ignored. It uses `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` from
 FastAPI logs only a masked sender number, message ID, text length, and Meta delivery
 status/error code; it does not log the message body or full phone number.
 
-The FastAPI `POST /send-whatsapp-otp` endpoint accepts
-`{"phoneNumber":"+919876543210"}` and sends the `auth_login_otp` template in `en_US`.
-It stores a keyed hash for verification by the existing patient OTP flow, enforces the
-existing one-minute per-number request limit, and never returns the OTP in its response.
+Patient sign-in uses the registered email or mobile number with the account password.
+WhatsApp OTPs are used only to verify a mobile number during registration and to reset
+a forgotten password. The FastAPI `POST /send-whatsapp-otp` endpoint accepts
+`{"phoneNumber":"+919876543210","purpose":"registration"}` (or
+`"purpose":"password_reset"`) and sends the `auth_login_otp` template in `en_US`.
+It stores a purpose-scoped keyed hash, enforces the one-minute per-number-and-purpose
+request limit, and never returns the OTP in its response.
 Apply `20261114000100_add_whatsapp_login_otps.sql` and
-`20261114000200_add_whatsapp_login_otp_verification.sql` before using this endpoint.
+`20261114000200_add_whatsapp_login_otp_verification.sql` before using this endpoint,
+then apply `20261124000100_scope_whatsapp_otps_and_phone_lookup.sql` for purpose-scoped
+registration/reset OTPs and mobile-number password sign-in.
 
 ## WhatsApp token booking notifications
 
@@ -99,12 +104,10 @@ Razorpay webhook URL as `/api/payments/razorpay/webhook`, subscribe to
 `payment.captured`, and set the matching signing secret as `RAZORPAY_WEBHOOK_SECRET`.
 Use an HTTPS public URL (or a secure tunnel during local development).
 
-Select **Forgot password?** on a sign-in form to open the recovery form, enter the
-account email, and request a link. All password reset emails return to the existing
-Supabase Site URL, and the app root handles the recovery callback before the normal
-clinic redirect. Set the Supabase Site URL to the app origin (for example,
-`http://localhost:3000` for local development or your production domain). No
-additional callback redirect URLs are required for password recovery.
+Patient **Forgot password?** sends a WhatsApp code to the registered mobile number;
+the user verifies it and chooses a new password. Staff and admin password recovery
+continues to use email links. Configure the Supabase Site URL and allowed redirect
+URLs for those staff/admin recovery links as described in the Supabase dashboard.
 
 ## Getting Started
 

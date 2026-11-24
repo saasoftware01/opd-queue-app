@@ -57,7 +57,7 @@ def _supabase_headers(service_role_key: str) -> dict[str, str]:
     }
 
 
-async def _store_login_otp(phone_hash: str, otp_hash: str) -> bool:
+async def _store_login_otp(phone_hash: str, otp_hash: str, purpose: str) -> bool:
     credentials = _supabase_credentials()
     if not credentials:
         logger.error("WhatsApp OTP storage is not configured.")
@@ -69,20 +69,24 @@ async def _store_login_otp(phone_hash: str, otp_hash: str) -> bool:
             response = await client.post(
                 f"{supabase_url}/rest/v1/rpc/store_whatsapp_login_otp",
                 headers=_supabase_headers(service_role_key),
-                json={"p_phone_hash": phone_hash, "p_otp_hash": otp_hash},
+                json={
+                    "p_phone_hash": phone_hash,
+                    "p_otp_hash": otp_hash,
+                    "p_purpose": purpose,
+                },
             )
     except httpx.RequestError as exc:
         logger.error("Unable to reach Supabase for WhatsApp OTP storage: %s", exc)
         raise HTTPException(
             status_code=502,
-            detail="Unable to prepare the WhatsApp login code.",
+            detail="Unable to prepare the WhatsApp verification code.",
         ) from exc
 
     if not response.is_success:
         logger.error("Supabase rejected WhatsApp OTP storage: status=%s", response.status_code)
         raise HTTPException(
             status_code=502,
-            detail="Unable to prepare the WhatsApp login code.",
+            detail="Unable to prepare the WhatsApp verification code.",
         )
     try:
         reserved = response.json()
@@ -90,7 +94,7 @@ async def _store_login_otp(phone_hash: str, otp_hash: str) -> bool:
         logger.error("Supabase returned an invalid WhatsApp OTP storage response.")
         raise HTTPException(
             status_code=502,
-            detail="Unable to prepare the WhatsApp login code.",
+            detail="Unable to prepare the WhatsApp verification code.",
         ) from exc
     if not isinstance(reserved, bool):
         logger.error("Supabase returned an invalid WhatsApp OTP storage response.")
@@ -101,7 +105,7 @@ async def _store_login_otp(phone_hash: str, otp_hash: str) -> bool:
     return reserved
 
 
-async def _release_login_otp(phone_hash: str) -> None:
+async def _release_login_otp(phone_hash: str, purpose: str) -> None:
     credentials = _supabase_credentials()
     if not credentials:
         logger.error("Unable to remove unsent WhatsApp OTP: Supabase is not configured.")
@@ -112,7 +116,10 @@ async def _release_login_otp(phone_hash: str) -> None:
         async with httpx.AsyncClient(timeout=10) as client:
             response = await client.delete(
                 f"{supabase_url}/rest/v1/whatsapp_login_otps",
-                params={"phone_hash": f"eq.{phone_hash}"},
+                params={
+                    "phone_hash": f"eq.{phone_hash}",
+                    "purpose": f"eq.{purpose}",
+                },
                 headers=_supabase_headers(service_role_key),
             )
     except httpx.RequestError as exc:
@@ -148,14 +155,20 @@ async def send_whatsapp_otp(request: Request) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid request body.") from exc
     if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="A valid mobile number is required.")
+        raise HTTPException(
+            status_code=400,
+            detail="A valid mobile number and OTP purpose are required.",
+        )
 
     phone = _normalize_indian_mobile(body.get("phoneNumber"))
+    purpose = body.get("purpose")
     if not phone:
         raise HTTPException(
             status_code=400,
             detail="Enter a valid 10-digit Indian mobile number.",
         )
+    if purpose not in ("registration", "password_reset"):
+        raise HTTPException(status_code=400, detail="A valid OTP purpose is required.")
 
     phone_number_id = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
     access_token = os.getenv("WHATSAPP_ACCESS_TOKEN")
@@ -169,7 +182,7 @@ async def send_whatsapp_otp(request: Request) -> dict[str, Any]:
     phone_hash = _otp_hash(f"phone:{mobile}", service_role_key)
     otp_code = f"{secrets.randbelow(1_000_000):06d}"
     otp_hash = _otp_hash(f"otp:{mobile}:{otp_code}", service_role_key)
-    reserved = await _store_login_otp(phone_hash, otp_hash)
+    reserved = await _store_login_otp(phone_hash, otp_hash, purpose)
     if not reserved:
         raise HTTPException(
             status_code=429,
@@ -211,16 +224,16 @@ async def send_whatsapp_otp(request: Request) -> dict[str, Any]:
                 json=payload,
             )
     except httpx.RequestError as exc:
-        await _release_login_otp(phone_hash)
+        await _release_login_otp(phone_hash, purpose)
         logger.error("WhatsApp Cloud API OTP request failed: %s", exc)
         raise HTTPException(
             status_code=502,
-            detail="Unable to send the WhatsApp login code.",
+            detail="Unable to send the WhatsApp verification code.",
         ) from exc
 
     if not response.is_success:
         error_code, error_message = _meta_error(response)
-        await _release_login_otp(phone_hash)
+        await _release_login_otp(phone_hash, purpose)
         logger.error(
             "WhatsApp Cloud API rejected OTP: status=%s code=%s message=%s",
             response.status_code,
@@ -229,7 +242,7 @@ async def send_whatsapp_otp(request: Request) -> dict[str, Any]:
         )
         raise HTTPException(
             status_code=502,
-            detail="Unable to send the WhatsApp login code.",
+            detail="Unable to send the WhatsApp verification code.",
         )
 
     return {"success": True, "expiresInSeconds": OTP_EXPIRY_SECONDS}
