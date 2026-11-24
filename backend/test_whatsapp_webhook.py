@@ -92,7 +92,10 @@ class WhatsAppWebhookTests(unittest.IsolatedAsyncioTestCase):
         ):
             response = await self.client.post(
                 "/send-whatsapp-otp",
-                json={"phoneNumber": "+91 98765-43210"},
+                json={
+                    "phoneNumber": "+91 98765-43210",
+                    "purpose": "registration",
+                },
             )
 
         self.assertEqual(response.status_code, 200)
@@ -103,6 +106,7 @@ class WhatsAppWebhookTests(unittest.IsolatedAsyncioTestCase):
         otp_storage = requests[0]
         self.assertTrue(otp_storage.url.path.endswith("/rpc/store_whatsapp_login_otp"))
         stored_hashes = json.loads(otp_storage.content)
+        self.assertEqual(stored_hashes["p_purpose"], "registration")
         self.assertEqual(
             stored_hashes["p_phone_hash"],
             hmac.new(
@@ -168,7 +172,7 @@ class WhatsAppWebhookTests(unittest.IsolatedAsyncioTestCase):
         ):
             response = await self.client.post(
                 "/send-whatsapp-otp",
-                json={"phoneNumber": "9876543210"},
+                json={"phoneNumber": "9876543210", "purpose": "registration"},
             )
 
         self.assertEqual(response.status_code, 429)
@@ -208,16 +212,28 @@ class WhatsAppWebhookTests(unittest.IsolatedAsyncioTestCase):
         ):
             response = await self.client.post(
                 "/send-whatsapp-otp",
-                json={"phoneNumber": "9876543210"},
+                json={"phoneNumber": "9876543210", "purpose": "registration"},
             )
 
         self.assertEqual(response.status_code, 502)
-        self.assertTrue(any(request.method == "DELETE" for request in requests))
+        release_request = next(request for request in requests if request.method == "DELETE")
+        self.assertEqual(
+            release_request.url.params["purpose"],
+            "eq.registration",
+        )
 
     async def test_send_otp_rejects_invalid_phone_number(self) -> None:
         response = await self.client.post(
             "/send-whatsapp-otp",
-            json={"phoneNumber": "123"},
+            json={"phoneNumber": "123", "purpose": "registration"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+    async def test_send_otp_rejects_login_purpose(self) -> None:
+        response = await self.client.post(
+            "/send-whatsapp-otp",
+            json={"phoneNumber": "9876543210", "purpose": "login"},
         )
 
         self.assertEqual(response.status_code, 400)

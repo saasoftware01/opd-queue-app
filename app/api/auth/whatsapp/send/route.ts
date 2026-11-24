@@ -10,6 +10,7 @@ import {
   WHATSAPP_TEST_OTP,
   WHATSAPP_TEST_PHONE_MOBILE,
 } from '@/lib/server/whatsapp-otp';
+import { findPatientPhoneAccount, isPatientPhoneAccount } from '@/lib/server/patient-phone-account';
 
 const META_GRAPH_API_VERSION = 'v27.0';
 
@@ -45,14 +46,18 @@ export async function POST(request: Request) {
     return jsonResponse({ error: 'Invalid request body.' }, 400);
   }
 
-  if (!body || typeof body !== 'object' || !('phoneNumber' in body)) {
-    return jsonResponse({ error: 'A valid mobile number is required.' }, 400);
+  if (!body || typeof body !== 'object' || !('phoneNumber' in body) || !('purpose' in body)) {
+    return jsonResponse({ error: 'A valid mobile number and OTP purpose are required.' }, 400);
   }
 
   const phone = normalizeIndianMobile(body.phoneNumber);
+  const purpose = body.purpose === 'registration' || body.purpose === 'password_reset'
+    ? body.purpose
+    : null;
   if (!phone) {
     return jsonResponse({ error: 'Enter a valid 10-digit Indian mobile number.' }, 400);
   }
+  if (!purpose) return jsonResponse({ error: 'A valid OTP purpose is required.' }, 400);
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -82,14 +87,49 @@ export async function POST(request: Request) {
     auth: { autoRefreshToken: false, persistSession: false },
   });
 
+  if (purpose === 'registration') {
+    const { account, ambiguous, error } = await findPatientPhoneAccount(admin, phone.mobile);
+    if (error) {
+      console.error('Patient registration account lookup failed:', error);
+      return jsonResponse({ error: 'Unable to verify this mobile number.' }, 500);
+    }
+    if (account || ambiguous) {
+      return jsonResponse(
+        { error: 'An account is already registered with this mobile number.' },
+        409
+      );
+    }
+  }
+
+  if (purpose === 'password_reset') {
+    const { account, ambiguous, error } = await findPatientPhoneAccount(admin, phone.mobile);
+    if (error) {
+      console.error('Patient password-reset account lookup failed:', error);
+      return jsonResponse({ error: 'Unable to prepare a password-reset code.' }, 500);
+    }
+    if (ambiguous || !account) {
+      return jsonResponse({ success: true, expiresInSeconds: 180 });
+    }
+    if (account) {
+      try {
+        if (!(await isPatientPhoneAccount(admin, account))) {
+          return jsonResponse({ success: true, expiresInSeconds: 180 });
+        }
+      } catch (accountError) {
+        console.error('Patient password-reset account role lookup failed:', accountError);
+        return jsonResponse({ error: 'Unable to prepare a password-reset code.' }, 500);
+      }
+    }
+  }
+
   const { data: reserved, error: reserveError } = await admin.rpc(
     'store_whatsapp_login_otp',
-    { p_phone_hash: phoneHash, p_otp_hash: otpHash }
+    { p_phone_hash: phoneHash, p_otp_hash: otpHash, p_purpose: purpose }
   );
 
   if (reserveError) {
     console.error('WhatsApp OTP reservation failed:', reserveError);
-    return jsonResponse({ error: 'Unable to prepare a login code.' }, 500);
+    return jsonResponse({ error: 'Unable to prepare a verification code.' }, 500);
   }
   if (!reserved) {
     return jsonResponse(
@@ -102,7 +142,8 @@ export async function POST(request: Request) {
     const { error } = await admin
       .from('whatsapp_login_otps')
       .delete()
-      .eq('phone_hash', phoneHash);
+      .eq('phone_hash', phoneHash)
+      .eq('purpose', purpose);
     if (error) console.error('Failed to remove unsent WhatsApp OTP:', error);
   };
 

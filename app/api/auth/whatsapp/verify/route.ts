@@ -1,6 +1,8 @@
 import 'server-only';
 
-import { createClient, type User } from '@supabase/supabase-js';
+import { createClient } from '@supabase/supabase-js';
+import { isValidPassword, PASSWORD_REQUIREMENT } from '@/lib/password-policy';
+import { findPatientPhoneAccount, isPatientPhoneAccount } from '@/lib/server/patient-phone-account';
 import {
   hashWhatsappOtp,
   hashWhatsappPhone,
@@ -10,26 +12,8 @@ import {
   WHATSAPP_TEST_PHONE_MOBILE,
 } from '@/lib/server/whatsapp-otp';
 
-interface AuthUserRecord {
-  user_id: string;
-  user_email: string | null;
-  user_metadata: Record<string, unknown>;
-  app_metadata: Record<string, unknown>;
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function parseAuthUserRecord(value: unknown): AuthUserRecord | null {
-  if (!isRecord(value) || typeof value.user_id !== 'string') return null;
-
-  return {
-    user_id: value.user_id,
-    user_email: typeof value.user_email === 'string' ? value.user_email : null,
-    user_metadata: isRecord(value.user_metadata) ? value.user_metadata : {},
-    app_metadata: isRecord(value.app_metadata) ? value.app_metadata : {},
-  };
 }
 
 const jsonResponse = (body: Record<string, unknown>, status = 200) =>
@@ -43,33 +27,84 @@ export async function POST(request: Request) {
   try {
     body = await request.json();
   } catch {
-    return jsonResponse({ error: 'Invalid request body.' }, 400);
+    return jsonResponse({ error: 'Invalid OTP verification request.' }, 400);
   }
-
   if (!isRecord(body)) {
-    return jsonResponse({ error: 'A mobile number and 6-digit OTP are required.' }, 400);
+    return jsonResponse({ error: 'A mobile number, OTP, and verification purpose are required.' }, 400);
   }
 
+  const purpose = body.purpose === 'registration' || body.purpose === 'password_reset'
+    ? body.purpose
+    : null;
   const phone = normalizeIndianMobile(body.phoneNumber);
   const otpCode = typeof body.otpCode === 'string' ? body.otpCode.trim() : '';
-  const referralCode = typeof body.referred_by === 'string'
-    ? body.referred_by.trim().toUpperCase()
-    : '';
-  if (!phone || !/^\d{6}$/.test(otpCode)) {
-    return jsonResponse({ error: 'Enter a valid mobile number and 6-digit OTP.' }, 400);
-  }
-  if (
-    (body.referred_by !== undefined && typeof body.referred_by !== 'string')
-    || referralCode.length > 32
-  ) {
-    return jsonResponse({ error: 'Enter a valid referral code.' }, 400);
+  if (!purpose || !phone || !/^\d{6}$/.test(otpCode)) {
+    return jsonResponse({ error: 'Enter a valid mobile number, 6-digit OTP, and purpose.' }, 400);
   }
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!supabaseUrl || !anonKey || !serviceRoleKey) {
-    return jsonResponse({ error: 'WhatsApp login is not configured.' }, 503);
+  if (!supabaseUrl || !serviceRoleKey) {
+    return jsonResponse({ error: 'WhatsApp verification is not configured.' }, 503);
+  }
+  if (
+    purpose === 'registration'
+    && (
+      typeof body.email !== 'string'
+      || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email.trim())
+      || typeof body.password !== 'string'
+      || !isValidPassword(body.password)
+      || typeof body.fullName !== 'string'
+      || !body.fullName.trim()
+      || body.fullName.trim().length > 120
+      || (body.referred_by !== undefined && typeof body.referred_by !== 'string')
+    )
+  ) {
+    return jsonResponse({
+      error: typeof body.password === 'string' && !isValidPassword(body.password)
+        ? PASSWORD_REQUIREMENT
+        : 'Enter valid registration details.',
+    }, 400);
+  }
+  if (
+    purpose === 'password_reset'
+    && (typeof body.password !== 'string' || !isValidPassword(body.password))
+  ) {
+    return jsonResponse({ error: PASSWORD_REQUIREMENT }, 400);
+  }
+
+  const admin = createClient(supabaseUrl, serviceRoleKey, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+  if (purpose === 'registration') {
+    const { data: platformSettings, error: settingsError } = await admin
+      .from('platform_settings')
+      .select('enforce_referral_system')
+      .limit(1)
+      .maybeSingle();
+    if (settingsError) {
+      console.error('Registration referral setting lookup failed:', settingsError);
+      return jsonResponse({ error: 'Unable to complete registration.' }, 500);
+    }
+    if (!platformSettings) {
+      return jsonResponse({ error: 'Registration settings are unavailable.' }, 503);
+    }
+
+    const referralCode = typeof body.referred_by === 'string'
+      ? body.referred_by.trim().toUpperCase()
+      : '';
+    if (platformSettings.enforce_referral_system && referralCode) {
+      const { data: referrer, error: referrerError } = await admin
+        .from('patients')
+        .select('id')
+        .eq('referral_code', referralCode)
+        .maybeSingle();
+      if (referrerError) {
+        console.error('Registration referral code lookup failed:', referrerError);
+        return jsonResponse({ error: 'Unable to validate the referral code.' }, 500);
+      }
+      if (!referrer) return jsonResponse({ error: 'The referral code is invalid.' }, 400);
+    }
   }
 
   const phoneHash = hashWhatsappPhone(phone.mobile, serviceRoleKey);
@@ -80,185 +115,45 @@ export async function POST(request: Request) {
   const otpHash = useMockOtp
     ? hashWhatsappTestOtp(phone.mobile, otpCode, serviceRoleKey)
     : hashWhatsappOtp(phone.mobile, otpCode, serviceRoleKey);
-  const admin = createClient(supabaseUrl, serviceRoleKey, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  });
-
-  const { data: platformSettings, error: settingsError } = await admin
-    .from('platform_settings')
-    .select('enforce_referral_system')
-    .limit(1)
-    .maybeSingle();
-  if (settingsError) {
-    console.error('Referral setting lookup failed:', settingsError);
-    return jsonResponse({ error: 'Unable to load referral settings.' }, 500);
-  }
-  if (!platformSettings) {
-    return jsonResponse({ error: 'Referral settings were not found.' }, 503);
-  }
-  const referralProgramEnabled = platformSettings.enforce_referral_system;
-
   const { data: otpValid, error: otpError } = await admin.rpc(
     'consume_whatsapp_login_otp',
-    { p_phone_hash: phoneHash, p_otp_hash: otpHash }
+    { p_phone_hash: phoneHash, p_otp_hash: otpHash, p_purpose: purpose }
   );
   if (otpError) {
-    console.error('WhatsApp OTP verification failed.');
-    return jsonResponse({ error: 'Unable to verify the login code.' }, 500);
+    console.error('WhatsApp OTP verification failed:', otpError);
+    return jsonResponse({ error: 'Unable to verify the code.' }, 500);
   }
-  if (!otpValid) {
-    return jsonResponse({ error: 'The OTP is invalid or has expired.' }, 401);
+  if (!otpValid) return jsonResponse({ error: 'The OTP is invalid or has expired.' }, 401);
+
+  const { account, ambiguous, error: accountLookupError } = await findPatientPhoneAccount(admin, phone.mobile);
+  if (accountLookupError) {
+    console.error('WhatsApp verification account lookup failed:', accountLookupError);
+    return jsonResponse({ error: 'Unable to verify this account.' }, 500);
   }
 
-  const { data: userRows, error: lookupError } = await admin.rpc(
-    'find_whatsapp_auth_user_by_phone',
-    { p_phone_digits: phone.mobile }
+  if (purpose === 'registration' && (account || ambiguous)) {
+    return jsonResponse({ error: 'An account is already registered with this mobile number.' }, 409);
+  }
+  if (purpose === 'registration') return jsonResponse({ success: true });
+
+  if (!account || ambiguous) return jsonResponse({ error: 'The OTP is invalid or has expired.' }, 401);
+  try {
+    if (!(await isPatientPhoneAccount(admin, account))) {
+      return jsonResponse({ error: 'The OTP is invalid or has expired.' }, 401);
+    }
+  } catch (error) {
+    console.error('Password-reset account role lookup failed:', error);
+    return jsonResponse({ error: 'Unable to verify this account.' }, 500);
+  }
+  const newPassword = typeof body.password === 'string' ? body.password : '';
+  const { data: updatedUser, error: updateError } = await admin.auth.admin.updateUserById(
+    account.userId,
+    { password: newPassword }
   );
-  if (lookupError) {
-    console.error('Patient account lookup failed:', lookupError);
-    return jsonResponse({ error: 'Unable to load the patient account.' }, 500);
+  if (updateError || !updatedUser.user) {
+    console.error('Patient password reset failed:', updateError);
+    return jsonResponse({ error: 'Unable to reset the password. Please try again.' }, 500);
   }
 
-  const existingUser = Array.isArray(userRows)
-    ? parseAuthUserRecord(userRows[0])
-    : null;
-  let user: User;
-
-  if (!existingUser && referralProgramEnabled && referralCode) {
-    const { data: referrer, error: referrerError } = await admin
-      .from('patients')
-      .select('id')
-      .eq('referral_code', referralCode)
-      .maybeSingle();
-    if (referrerError) {
-      console.error('Referral code lookup failed:', referrerError);
-      return jsonResponse({ error: 'Unable to validate the referral code.' }, 500);
-    }
-    if (!referrer) {
-      return jsonResponse({ error: 'The referral code is invalid.' }, 400);
-    }
-  }
-
-  if (existingUser) {
-    const existingRole = existingUser.app_metadata.role;
-    if (typeof existingRole === 'string' && existingRole !== 'patient') {
-      return jsonResponse({ error: 'This account cannot sign in as a patient.' }, 403);
-    }
-
-    if (typeof existingRole !== 'string') {
-      const { data: clinic, error: clinicError } = await admin
-        .from('clinics')
-        .select('id')
-        .eq('owner_id', existingUser.user_id)
-        .maybeSingle();
-      if (clinicError) {
-        console.error('Patient account role check failed.');
-        return jsonResponse({ error: 'Unable to verify the patient account.' }, 500);
-      }
-      if (clinic || existingUser.user_email?.toLowerCase() === process.env.ADMIN_EMAIL?.trim().toLowerCase()) {
-        return jsonResponse({ error: 'This account cannot sign in as a patient.' }, 403);
-      }
-    }
-
-    const internalEmail = `otp-${phoneHash}@patient-login.invalid`;
-    const updateAttributes: {
-      email?: string;
-      email_confirm?: boolean;
-      app_metadata?: Record<string, unknown>;
-    } = {};
-
-    if (!existingUser.user_email) {
-      updateAttributes.email = internalEmail;
-      updateAttributes.email_confirm = true;
-    }
-    if (typeof existingRole !== 'string') {
-      updateAttributes.app_metadata = { ...existingUser.app_metadata, role: 'patient' };
-    }
-
-    if (Object.keys(updateAttributes).length > 0) {
-      const { data, error } = await admin.auth.admin.updateUserById(
-        existingUser.user_id,
-        updateAttributes
-      );
-      if (error || !data.user) {
-        console.error('Patient account update failed:', error?.message);
-        return jsonResponse({ error: 'Unable to prepare the patient account.' }, 500);
-      }
-      user = data.user;
-    } else {
-      const { data, error } = await admin.auth.admin.getUserById(existingUser.user_id);
-      if (error || !data.user) {
-        console.error('Patient account load failed:', error?.message);
-        return jsonResponse({ error: 'Unable to load the patient account.' }, 500);
-      }
-      user = data.user;
-    }
-  } else {
-    const internalEmail = `otp-${phoneHash}@patient-login.invalid`;
-    const { data, error } = await admin.auth.admin.createUser({
-      email: internalEmail,
-      email_confirm: true,
-      phone: `+91${phone.mobile}`,
-      phone_confirm: true,
-      user_metadata: {
-        account_type: 'patient',
-        phone: phone.mobile,
-        referred_by: referralProgramEnabled ? referralCode || null : null,
-      },
-      app_metadata: { role: 'patient' },
-    });
-    if (error || !data.user) {
-      console.error('Patient account creation failed:', error?.message);
-      return jsonResponse({ error: 'Unable to create the patient account.' }, 500);
-    }
-    user = data.user;
-  }
-
-  if (!user.email) {
-    return jsonResponse({ error: 'Unable to create a secure login session.' }, 500);
-  }
-
-  const { data: linkData, error: linkError } = await admin.auth.admin.generateLink({
-    type: 'magiclink',
-    email: user.email,
-  });
-  if (linkError) {
-    console.error('Patient session link generation failed:', linkError.message);
-    return jsonResponse({ error: 'Unable to create a secure login session.' }, 500);
-  }
-
-  const sessionClient = createClient(supabaseUrl, anonKey, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  });
-  const { data: sessionData, error: sessionError } = await sessionClient.auth.verifyOtp({
-    token_hash: linkData.properties.hashed_token,
-    type: 'magiclink',
-  });
-  if (sessionError || !sessionData.session) {
-    console.error('Patient Supabase session exchange failed:', sessionError?.message);
-    return jsonResponse({ error: 'Unable to create a secure login session.' }, 500);
-  }
-
-  const session = sessionData.session;
-  const role = typeof user.app_metadata.role === 'string'
-    ? user.app_metadata.role
-    : 'patient';
-  const fullName = user.user_metadata.full_name;
-
-  return jsonResponse({
-    success: true,
-    user: {
-      id: user.id,
-      phone: user.phone || `+91${phone.mobile}`,
-      fullName: typeof fullName === 'string' ? fullName : null,
-      role,
-    },
-    session: {
-      access_token: session.access_token,
-      refresh_token: session.refresh_token,
-      token_type: session.token_type,
-      expires_in: session.expires_in,
-      expires_at: session.expires_at,
-    },
-  });
+  return jsonResponse({ success: true });
 }
