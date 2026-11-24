@@ -104,6 +104,11 @@ interface QueueTicket {
 const HISTORY_PAGE_SIZE = 10;
 const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
+function getTokenNumber(tokenNumber: string): number {
+  const match = tokenNumber.match(/(\d+)$/);
+  return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
+}
+
 function formatCurrency(amount: number): string {
   return `₹${amount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
@@ -138,7 +143,6 @@ export default function ReceptionDeskPage() {
   const [historyStartDate, setHistoryStartDate] = useState(getClinicDateString());
   const [historyEndDate, setHistoryEndDate] = useState(getClinicDateString());
   const [historySearch, setHistorySearch] = useState('');
-  const [historyPriority, setHistoryPriority] = useState<'all' | 'normal' | 'senior' | 'emergency'>('all');
   const [historyStatus, setHistoryStatus] = useState<'all' | QueueTicket['status']>('all');
   const [historyPaymentMode, setHistoryPaymentMode] = useState<'all' | 'unrecorded' | 'CASH' | 'UPI' | 'CARD' | 'OTHER' | 'NONE'>('all');
   const [historyPage, setHistoryPage] = useState(0);
@@ -332,7 +336,6 @@ export default function ReceptionDeskPage() {
   const [phoneNumber, setPhoneNumber] = useState('');
   const [patientAge, setPatientAge] = useState('');
   const [patientGender, setPatientGender] = useState('');
-  const [priority, setPriority] = useState<'normal' | 'senior' | 'emergency'>('normal');
   const [paymentMode, setPaymentMode] = useState<'CASH' | 'UPI'>('CASH');
   const [notes, setNotes] = useState('');
 
@@ -493,15 +496,13 @@ export default function ReceptionDeskPage() {
       setTodayCompletedCount(completed.length);
       setTodayCollection(completed.reduce((total, ticket) => total + (ticket.paid_amount ?? 0), 0));
 
-      // Filter and sort waiting queue by priority
+      // Sort the waiting queue by token number only.
       const waiting = tickets.filter((t) => t.status === 'waiting');
       const skipped = tickets.filter((t) => t.status === 'skipped' && t.doctor_id === docId);
-      const priorityWeights = { emergency: 0, senior: 1, normal: 2 };
 
       waiting.sort((a, b) => {
-        const pA = priorityWeights[a.priority as keyof typeof priorityWeights] ?? 2;
-        const pB = priorityWeights[b.priority as keyof typeof priorityWeights] ?? 2;
-        if (pA !== pB) return pA - pB;
+        const numberDifference = getTokenNumber(a.token_number) - getTokenNumber(b.token_number);
+        if (numberDifference !== 0) return numberDifference;
         return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
       });
 
@@ -627,11 +628,6 @@ export default function ReceptionDeskPage() {
   // ACTION 1: Single-Tap Call Next
   const handleCallNext = async () => {
     if (!currentDoctor) return;
-    if (queueTickets.length === 0) {
-      setErrorMsg('No waiting patients in queue.');
-      return;
-    }
-
     if (currentPatient) {
       setErrorMsg('Please complete or hold the current patient consultation first.');
       return;
@@ -643,7 +639,28 @@ export default function ReceptionDeskPage() {
     setSuccessMsg('');
 
     try {
-      const nextTicket = queueTickets[0];
+      const { start, end } = getClinicDayRange();
+      const { data: waitingTickets, error: waitingError } = await supabase
+        .from('tickets')
+        .select('id, token_number, patient_name, created_at')
+        .eq('department_id', currentDoctor.department_id)
+        .eq('status', 'waiting')
+        .gte('created_at', start)
+        .lt('created_at', end);
+
+      if (waitingError) throw waitingError;
+
+      const orderedWaitingTickets = (waitingTickets || []).sort((a, b) => {
+        const numberDifference = getTokenNumber(a.token_number) - getTokenNumber(b.token_number);
+        if (numberDifference !== 0) return numberDifference;
+        return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+      });
+      const nextTicket = orderedWaitingTickets[0];
+
+      if (!nextTicket) {
+        setErrorMsg('No waiting patients in queue.');
+        return;
+      }
 
       const { error } = await supabase
         .from('tickets')
@@ -652,7 +669,8 @@ export default function ReceptionDeskPage() {
           doctor_id: currentDoctor.id,
           called_at: new Date().toISOString(),
         })
-        .eq('id', nextTicket.id);
+        .eq('id', nextTicket.id)
+        .eq('status', 'waiting');
 
       if (error) throw error;
 
@@ -846,7 +864,7 @@ export default function ReceptionDeskPage() {
             department_id: currentDoctor.department_id,
             doctor_id: currentDoctor.id,
             status: 'waiting',
-            priority: priority,
+            priority: 'normal',
             notes: finalNotes,
           },
         ])
@@ -865,7 +883,6 @@ export default function ReceptionDeskPage() {
       setPatientAge('');
       setPatientGender('');
       setNotes('');
-      setPriority('normal');
       setPaymentMode('CASH');
 
       fetchDoctorQueue(currentDoctor.department_id, currentDoctor.id);
@@ -1112,7 +1129,6 @@ export default function ReceptionDeskPage() {
 
     return historyTickets.filter((ticket) => {
       if (historyStatus !== 'all' && ticket.status !== historyStatus) return false;
-      if (historyPriority !== 'all' && ticket.priority !== historyPriority) return false;
       if (historyPaymentMode === 'unrecorded' && (ticket.paid_amount != null || ticket.payment_mode != null)) return false;
       if (historyPaymentMode !== 'all' && historyPaymentMode !== 'unrecorded' && ticket.payment_mode !== historyPaymentMode) return false;
       if (!query) return true;
@@ -1123,12 +1139,11 @@ export default function ReceptionDeskPage() {
         ticket.phone_number,
         ticket.patient_age?.toString(),
         ticket.patient_gender,
-        ticket.priority,
         ticket.status,
         ticket.notes,
       ].some((value) => value?.toLowerCase().includes(query));
     });
-  }, [historyPaymentMode, historyPriority, historySearch, historyStatus, historyTickets]);
+  }, [historyPaymentMode, historySearch, historyStatus, historyTickets]);
 
   const historyPageCount = Math.max(1, Math.ceil(filteredHistoryTickets.length / HISTORY_PAGE_SIZE));
   const visibleHistoryTickets = filteredHistoryTickets.slice(
@@ -1145,7 +1160,6 @@ export default function ReceptionDeskPage() {
       'Phone',
       'Age',
       'Gender',
-      'Priority',
       'Status',
       'Doctor',
       'Room',
@@ -1161,7 +1175,6 @@ export default function ReceptionDeskPage() {
       ticket.phone_number || '',
       ticket.patient_age ?? '',
       ticket.patient_gender || '',
-      ticket.priority,
       ticket.status,
       ticket.doctors?.name || currentDoctor?.name || '',
       ticket.doctors?.room_number || currentDoctor?.room_number || '',
@@ -1450,16 +1463,6 @@ export default function ReceptionDeskPage() {
                           <span className="text-5xl font-black text-emerald-600 font-mono tracking-tight">
                             {currentPatient.token_number}
                           </span>
-                          {currentPatient.priority === 'emergency' && (
-                            <span className="bg-rose-100 text-rose-700 text-xs font-black px-2.5 py-1 rounded-md uppercase tracking-wider border border-rose-200">
-                              Emergency
-                            </span>
-                          )}
-                          {currentPatient.priority === 'senior' && (
-                            <span className="bg-amber-100 text-amber-800 text-xs font-black px-2.5 py-1 rounded-md uppercase tracking-wider border border-amber-200">
-                              Senior Citizen
-                            </span>
-                          )}
                         </div>
 
                         {/* Single Rupee Payment Badge */}
@@ -1662,7 +1665,7 @@ export default function ReceptionDeskPage() {
                 {skippedTickets.length > 0 && ` · ${skippedTickets.length} on hold`}
                 {previousDayConsultation && ' · 1 from previous day'}
               </h3>
-              <p className="text-xs text-slate-500">Sorted by Priority Tier & Arrival Timestamp</p>
+              <p className="text-xs text-slate-500">Sorted by Token Number</p>
             </div>
             <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">
               Live Sync Active
@@ -1678,7 +1681,6 @@ export default function ReceptionDeskPage() {
                   <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-500 uppercase">Patient Name</th>
                   <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-500 uppercase">Age</th>
                   <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-500 uppercase">Gender</th>
-                  <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-500 uppercase">Priority</th>
                   <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-500 uppercase">Notes / Tag</th>
                   <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-500 uppercase">Action</th>
                   <th className="px-6 py-3.5 text-left text-xs font-bold text-slate-500 uppercase">Booking time</th>
@@ -1688,13 +1690,13 @@ export default function ReceptionDeskPage() {
               <tbody className="bg-white divide-y divide-slate-100">
                 {loading ? (
                   <tr>
-                    <td colSpan={10} className="py-12 text-center text-slate-400 text-sm">
+                    <td colSpan={9} className="py-12 text-center text-slate-400 text-sm">
                       Loading synchronized queue...
                     </td>
                   </tr>
                 ) : queueTickets.length === 0 && skippedTickets.length === 0 && !previousDayConsultation ? (
                   <tr>
-                    <td colSpan={10} className="py-12 text-center text-slate-400 text-sm">
+                    <td colSpan={9} className="py-12 text-center text-slate-400 text-sm">
                       No patients waiting in queue. Click <span className="font-bold text-blue-600">&quot;+ Add Walk-In&quot;</span> to register an offline patient.
                     </td>
                   </tr>
@@ -1721,23 +1723,6 @@ export default function ReceptionDeskPage() {
                       </td>
                       <td className="px-6 py-4 text-sm font-semibold capitalize text-slate-700">
                         {t.patient_gender?.replaceAll('-', ' ') || '—'}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        {t.priority === 'emergency' && (
-                          <span className="px-2.5 py-1 rounded-full text-xs font-black bg-red-100 text-red-700">
-                            Emergency
-                          </span>
-                        )}
-                        {t.priority === 'senior' && (
-                          <span className="px-2.5 py-1 rounded-full text-xs font-black bg-amber-100 text-amber-800">
-                            Senior
-                          </span>
-                        )}
-                        {t.priority === 'normal' && (
-                          <span className="px-2.5 py-1 rounded-full text-xs font-medium bg-slate-100 text-slate-600">
-                            Normal
-                          </span>
-                        )}
                       </td>
                       <td className="px-6 py-4 text-xs max-w-xs">
                         {(() => {
@@ -1956,22 +1941,6 @@ export default function ReceptionDeskPage() {
               </select>
             </label>
 
-            <label className="block">
-              <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">Priority</span>
-              <select
-                value={historyPriority}
-                onChange={(event) => {
-                  setHistoryPriority(event.target.value as typeof historyPriority);
-                  setHistoryPage(0);
-                }}
-                className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-800 focus:border-blue-500 focus:outline-hidden focus:ring-2 focus:ring-blue-100"
-              >
-                <option value="all">All priorities</option>
-                <option value="normal">Normal</option>
-                <option value="senior">Senior</option>
-                <option value="emergency">Emergency</option>
-              </select>
-            </label>
 
             <label className="block">
               <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">Payment</span>
@@ -2007,7 +1976,6 @@ export default function ReceptionDeskPage() {
                   <th className="px-4 py-3 text-left text-[10px] font-bold uppercase text-slate-500">Token</th>
                   <th className="px-4 py-3 text-left text-[10px] font-bold uppercase text-slate-500">Patient</th>
                   <th className="px-4 py-3 text-left text-[10px] font-bold uppercase text-slate-500">Age / Gender</th>
-                  <th className="px-4 py-3 text-left text-[10px] font-bold uppercase text-slate-500">Priority</th>
                   <th className="px-4 py-3 text-left text-[10px] font-bold uppercase text-slate-500">Status</th>
                   <th className="px-4 py-3 text-left text-[10px] font-bold uppercase text-slate-500">Doctor / Room</th>
                   <th className="px-4 py-3 text-left text-[10px] font-bold uppercase text-slate-500">Notes</th>
@@ -2019,11 +1987,11 @@ export default function ReceptionDeskPage() {
               </thead>
               <tbody className="divide-y divide-slate-100 bg-white">
                 {isHistoryRangeInvalid ? (
-                  <tr><td colSpan={11} className="py-10 text-center text-xs text-rose-600">Choose a valid date range to view token outcomes.</td></tr>
+                  <tr><td colSpan={10} className="py-10 text-center text-xs text-rose-600">Choose a valid date range to view token outcomes.</td></tr>
                 ) : historyLoading ? (
-                  <tr><td colSpan={11} className="py-10 text-center text-xs font-semibold text-slate-400">Loading token history...</td></tr>
+                  <tr><td colSpan={10} className="py-10 text-center text-xs font-semibold text-slate-400">Loading token history...</td></tr>
                 ) : filteredHistoryTickets.length === 0 ? (
-                  <tr><td colSpan={11} className="py-10 text-center text-xs text-slate-400">No token outcomes match this date and filter.</td></tr>
+                  <tr><td colSpan={10} className="py-10 text-center text-xs text-slate-400">No token outcomes match this date and filter.</td></tr>
                 ) : visibleHistoryTickets.map((ticket) => {
                   const cleanNotes = (ticket.notes || '')
                     .replace(/\[\s*(UPI|CASH)\s*\]?/gi, '')
@@ -2041,7 +2009,6 @@ export default function ReceptionDeskPage() {
                       <td className="whitespace-nowrap px-4 py-3 text-xs text-slate-600">
                         {ticket.patient_age ?? '—'} / <span className="capitalize">{ticket.patient_gender?.replaceAll('-', ' ') || '—'}</span>
                       </td>
-                      <td className="whitespace-nowrap px-4 py-3 text-xs capitalize text-slate-600">{ticket.priority}</td>
                       <td className="whitespace-nowrap px-4 py-3">
                         <span className={`rounded-full px-2.5 py-1 text-[10px] font-extrabold capitalize ${
                           ticket.status === 'completed'
@@ -2287,29 +2254,6 @@ export default function ReceptionDeskPage() {
                     <option value="prefer-not-to-say">Prefer not to say</option>
                   </select>
                 </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                    Priority Tier
-                  </label>
-                  <select
-                    value={priority}
-                    onChange={(e) => {
-                      const selectedPriority = e.target.value;
-                      if (selectedPriority === 'normal' || selectedPriority === 'senior' || selectedPriority === 'emergency') {
-                        setPriority(selectedPriority);
-                      }
-                    }}
-                    className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-xs font-bold text-slate-800 focus:ring-2 focus:ring-blue-500"
-                  >
-                    <option value="normal">Normal</option>
-                    <option value="senior">Senior Citizen</option>
-                    <option value="emergency">Emergency</option>
-                  </select>
-                </div>
-
                 <div>
                   <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
                     Payment Mode

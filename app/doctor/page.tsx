@@ -22,6 +22,11 @@ import { getClinicDayRange } from '@/lib/clinic-day';
 import { getErrorMessage } from '@/lib/error-message';
 import { readPushNotificationResponse } from '@/lib/push-notification-response';
 
+function getTokenNumber(tokenNumber: string): number {
+  const match = tokenNumber.match(/(\d+)$/);
+  return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
+}
+
 export default function DoctorDashboardPage() {
   const [doctors, setDoctors] = useState<Doctor[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
@@ -98,11 +103,9 @@ export default function DoctorDashboardPage() {
       setCurrentPatient(active || null);
 
       const waiting = tickets.filter(t => t.status === 'waiting');
-      const priorityOrder = { emergency: 0, senior: 1, normal: 2 };
       waiting.sort((a, b) => {
-        const pA = priorityOrder[a.priority as keyof typeof priorityOrder] ?? 2;
-        const pB = priorityOrder[b.priority as keyof typeof priorityOrder] ?? 2;
-        if (pA !== pB) return pA - pB;
+        const numberDifference = getTokenNumber(a.token_number) - getTokenNumber(b.token_number);
+        if (numberDifference !== 0) return numberDifference;
         return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
       });
 
@@ -166,11 +169,6 @@ export default function DoctorDashboardPage() {
 
   const handleCallNext = async () => {
     if (!currentDoctor) return;
-    if (queueTickets.length === 0) {
-      setErrorMsg('No waiting patients in the queue.');
-      return;
-    }
-
     if (currentPatient) {
       setErrorMsg('Please complete or finish the current patient consultation first.');
       return;
@@ -181,7 +179,28 @@ export default function DoctorDashboardPage() {
     setSuccessMsg('');
 
     try {
-      const nextTicket = queueTickets[0];
+      const { start, end } = getClinicDayRange();
+      const { data: waitingTickets, error: waitingError } = await supabase
+        .from('tickets')
+        .select('id, token_number, patient_name, created_at')
+        .eq('department_id', currentDoctor.department_id)
+        .eq('status', 'waiting')
+        .gte('created_at', start)
+        .lt('created_at', end);
+
+      if (waitingError) throw waitingError;
+
+      const orderedWaitingTickets = (waitingTickets || []).sort((a, b) => {
+        const numberDifference = getTokenNumber(a.token_number) - getTokenNumber(b.token_number);
+        if (numberDifference !== 0) return numberDifference;
+        return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+      });
+      const nextTicket = orderedWaitingTickets[0];
+
+      if (!nextTicket) {
+        setErrorMsg('No waiting patients in the queue.');
+        return;
+      }
 
       const { error } = await supabase
         .from('tickets')
@@ -190,7 +209,8 @@ export default function DoctorDashboardPage() {
           doctor_id: currentDoctor.id,
           called_at: new Date().toISOString()
         })
-        .eq('id', nextTicket.id);
+        .eq('id', nextTicket.id)
+        .eq('status', 'waiting');
 
       if (error) throw error;
 
@@ -435,12 +455,6 @@ export default function DoctorDashboardPage() {
                           <span className="text-3xl font-black text-emerald-600 font-mono tracking-tight">
                             {currentPatient.token_number}
                           </span>
-                          {currentPatient.priority === 'emergency' && (
-                            <span className="bg-red-100 text-red-700 text-xs font-bold px-2.5 py-1 rounded-full uppercase">Emergency</span>
-                          )}
-                          {currentPatient.priority === 'senior' && (
-                            <span className="bg-amber-100 text-amber-800 text-xs font-bold px-2.5 py-1 rounded-full uppercase">Senior Citizen</span>
-                          )}
                         </div>
                         <h4 className="text-xl font-bold text-slate-900">{currentPatient.patient_name}</h4>
                         {currentPatient.phone_number && (
@@ -539,16 +553,6 @@ export default function DoctorDashboardPage() {
                               <span className="font-mono font-bold text-sm text-slate-900">
                                 {t.token_number}
                               </span>
-                              {t.priority === 'emergency' && (
-                                <span className="bg-red-100 text-red-700 text-[10px] font-bold px-1.5 py-0.5 rounded uppercase">
-                                  Emergency
-                                </span>
-                              )}
-                              {t.priority === 'senior' && (
-                                <span className="bg-amber-100 text-amber-800 text-[10px] font-bold px-1.5 py-0.5 rounded uppercase">
-                                  Senior
-                                </span>
-                              )}
                             </div>
                             <p className="text-xs text-slate-600 font-medium truncate max-w-[140px]">
                               {t.patient_name}
