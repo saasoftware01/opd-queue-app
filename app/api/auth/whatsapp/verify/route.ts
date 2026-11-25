@@ -3,6 +3,8 @@ import 'server-only';
 import { createClient } from '@supabase/supabase-js';
 import { isValidPassword, PASSWORD_REQUIREMENT } from '@/lib/password-policy';
 import { findPatientPhoneAccount, isPatientPhoneAccount } from '@/lib/server/patient-phone-account';
+import { findClinicPhoneAccount } from '@/lib/server/clinic-phone-account';
+import { findPhoneUpdateConflict, getPhoneUpdateUser } from '@/lib/server/whatsapp-profile-phone';
 import {
   hashWhatsappOtp,
   hashWhatsappPhone,
@@ -33,12 +35,19 @@ export async function POST(request: Request) {
     return jsonResponse({ error: 'A mobile number, OTP, and verification purpose are required.' }, 400);
   }
 
-  const purpose = body.purpose === 'registration' || body.purpose === 'password_reset'
+  const purpose = body.purpose === 'registration'
+    || body.purpose === 'password_reset'
+    || body.purpose === 'phone_update'
     ? body.purpose
     : null;
+  const audience = body.audience === undefined || body.audience === 'patient'
+    ? 'patient'
+    : body.audience === 'clinic'
+      ? 'clinic'
+      : null;
   const phone = normalizeIndianMobile(body.phoneNumber);
   const otpCode = typeof body.otpCode === 'string' ? body.otpCode.trim() : '';
-  if (!purpose || !phone || !/^\d{6}$/.test(otpCode)) {
+  if (!purpose || !audience || !phone || !/^\d{6}$/.test(otpCode)) {
     return jsonResponse({ error: 'Enter a valid mobile number, 6-digit OTP, and purpose.' }, 400);
   }
 
@@ -49,6 +58,7 @@ export async function POST(request: Request) {
   }
   if (
     purpose === 'registration'
+    && audience === 'patient'
     && (
       typeof body.email !== 'string'
       || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email.trim())
@@ -76,7 +86,19 @@ export async function POST(request: Request) {
   const admin = createClient(supabaseUrl, serviceRoleKey, {
     auth: { autoRefreshToken: false, persistSession: false },
   });
-  if (purpose === 'registration') {
+  let phoneUpdateUser: Awaited<ReturnType<typeof getPhoneUpdateUser>>['user'] = null;
+  if (purpose === 'phone_update') {
+    const result = await getPhoneUpdateUser(admin, request, audience);
+    if (result.error) {
+      console.error(`${audience} phone-update account check failed:`, result.error);
+      return jsonResponse({ error: 'Unable to verify your account. Please try again.' }, 500);
+    }
+    if (!result.user) {
+      return jsonResponse({ error: 'Sign in to update your account mobile number.' }, 401);
+    }
+    phoneUpdateUser = result.user;
+  }
+  if (purpose === 'registration' && audience === 'patient') {
     const { data: platformSettings, error: settingsError } = await admin
       .from('platform_settings')
       .select('enforce_referral_system')
@@ -125,25 +147,69 @@ export async function POST(request: Request) {
   }
   if (!otpValid) return jsonResponse({ error: 'The OTP is invalid or has expired.' }, 401);
 
-  const { account, ambiguous, error: accountLookupError } = await findPatientPhoneAccount(admin, phone.mobile);
+  const findPhoneAccount = audience === 'patient' ? findPatientPhoneAccount : findClinicPhoneAccount;
+  if (purpose === 'phone_update') {
+    if (!phoneUpdateUser) {
+      return jsonResponse({ error: 'Sign in to update your account mobile number.' }, 401);
+    }
+    const { alreadyLinked, conflict, error: accountLookupError } = await findPhoneUpdateConflict(
+      admin,
+      phone.mobile,
+      phoneUpdateUser.id,
+      audience
+    );
+    if (accountLookupError) {
+      console.error(`${audience} phone-update number lookup failed:`, accountLookupError);
+      return jsonResponse({ error: 'Unable to verify this mobile number.' }, 500);
+    }
+    if (conflict) {
+      return jsonResponse({ error: 'This mobile number is already registered. Enter a different number.' }, 409);
+    }
+    if (alreadyLinked) {
+      return jsonResponse({ error: 'This mobile number is already linked to your account.' }, 409);
+    }
+
+    const { data: updatedUser, error: updateError } = await admin.auth.admin.updateUserById(
+      phoneUpdateUser.id,
+      {
+        user_metadata: {
+          ...phoneUpdateUser.user_metadata,
+          phone: phone.mobile,
+        },
+      }
+    );
+    if (updateError || !updatedUser.user) {
+      console.error(`${audience} phone update failed:`, updateError);
+      return jsonResponse({ error: 'Unable to update your mobile number. Please try again.' }, 500);
+    }
+    return jsonResponse({ success: true });
+  }
+
+  const { account, ambiguous, error: accountLookupError } = await findPhoneAccount(admin, phone.mobile);
   if (accountLookupError) {
-    console.error('WhatsApp verification account lookup failed:', accountLookupError);
+    console.error(`${audience} WhatsApp verification account lookup failed:`, accountLookupError);
     return jsonResponse({ error: 'Unable to verify this account.' }, 500);
   }
 
   if (purpose === 'registration' && (account || ambiguous)) {
-    return jsonResponse({ error: 'An account is already registered with this mobile number.' }, 409);
+    return jsonResponse({
+      error: audience === 'patient'
+        ? 'An account is already registered with this mobile number.'
+        : 'A clinic account is already registered with this mobile number.',
+    }, 409);
   }
   if (purpose === 'registration') return jsonResponse({ success: true });
 
   if (!account || ambiguous) return jsonResponse({ error: 'The OTP is invalid or has expired.' }, 401);
-  try {
-    if (!(await isPatientPhoneAccount(admin, account))) {
-      return jsonResponse({ error: 'The OTP is invalid or has expired.' }, 401);
+  if (audience === 'patient') {
+    try {
+      if (!(await isPatientPhoneAccount(admin, account))) {
+        return jsonResponse({ error: 'The OTP is invalid or has expired.' }, 401);
+      }
+    } catch (error) {
+      console.error('Password-reset account role lookup failed:', error);
+      return jsonResponse({ error: 'Unable to verify this account.' }, 500);
     }
-  } catch (error) {
-    console.error('Password-reset account role lookup failed:', error);
-    return jsonResponse({ error: 'Unable to verify this account.' }, 500);
   }
   const newPassword = typeof body.password === 'string' ? body.password : '';
   const { data: updatedUser, error: updateError } = await admin.auth.admin.updateUserById(
@@ -151,7 +217,7 @@ export async function POST(request: Request) {
     { password: newPassword }
   );
   if (updateError || !updatedUser.user) {
-    console.error('Patient password reset failed:', updateError);
+    console.error(`${audience} password reset failed:`, updateError);
     return jsonResponse({ error: 'Unable to reset the password. Please try again.' }, 500);
   }
 

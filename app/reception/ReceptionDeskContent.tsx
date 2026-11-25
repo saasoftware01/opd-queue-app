@@ -51,6 +51,7 @@ import {
 import { getErrorMessage } from '@/lib/error-message';
 import { readPushNotificationResponse } from '@/lib/push-notification-response';
 import IndianCityField from '@/app/components/IndianCityField';
+import VerifiedPhoneEditor from '@/app/components/VerifiedPhoneEditor';
 import { getCanonicalIndianCity } from '@/lib/indian-cities';
 
 interface ExtendedDoctor extends Doctor {
@@ -165,6 +166,7 @@ export default function ReceptionDeskPage() {
   const [doctorEditName, setDoctorEditName] = useState('');
   const [doctorEditRoom, setDoctorEditRoom] = useState('');
   const [doctorEditFee, setDoctorEditFee] = useState('');
+  const [doctorAccountPhone, setDoctorAccountPhone] = useState('');
   const [doctorEditError, setDoctorEditError] = useState('');
   const [showQuickTokenModal, setShowQuickTokenModal] = useState<boolean>(false);
   const [ticketToReactivate, setTicketToReactivate] = useState<QueueTicket | null>(null);
@@ -980,7 +982,7 @@ export default function ReceptionDeskPage() {
     }
   };
 
-  const openDoctorEdit = () => {
+  const openDoctorEdit = async () => {
     if (!currentDoctor) return;
     setDoctorEditName(currentDoctor.name || '');
     setDoctorEditRoom(currentDoctor.room_number || '');
@@ -993,6 +995,18 @@ export default function ReceptionDeskPage() {
     setNewHolidayDates(currentDoctor.opd_holiday_dates || []);
     setNewHolidayDate('');
     setShowDoctorProfile(false);
+
+    const { data: authData, error: authError } = await supabase.auth.getUser();
+    if (authError) {
+      setDoctorAccountPhone('');
+      setDoctorEditError(getErrorMessage(authError, 'Could not load the clinic account mobile number.'));
+    } else {
+      const metadataPhone = authData.user?.user_metadata?.phone;
+      const accountPhone = typeof metadataPhone === 'string'
+        ? metadataPhone
+        : authData.user?.phone || '';
+      setDoctorAccountPhone(accountPhone.replace(/\D/g, '').replace(/^91(?=\d{10}$)/, ''));
+    }
     setShowDoctorEdit(true);
   };
 
@@ -2534,6 +2548,21 @@ export default function ReceptionDeskPage() {
                     </span>
                   </label>
                 </div>
+              </section>
+
+              <section className="rounded-2xl border border-slate-200 p-4 sm:p-5">
+                <div className="mb-4">
+                  <h4 className="text-sm font-extrabold text-slate-900">Clinic account mobile</h4>
+                  <p className="text-xs text-slate-500">
+                    Update the mobile used by doctors and reception for sign-in and password recovery.
+                  </p>
+                </div>
+                <VerifiedPhoneEditor
+                  audience="clinic"
+                  client={supabase}
+                  initialPhone={doctorAccountPhone}
+                  onVerified={(updatedPhone) => setDoctorAccountPhone(updatedPhone)}
+                />
               </section>
 
               {currentClinic && (

@@ -6,6 +6,7 @@ import { useSearchParams } from 'next/navigation';
 import type { User as SupabaseUser } from '@supabase/supabase-js';
 import { patientSupabase } from '@/lib/supabase/patient-client';
 import IndianCityField from '@/app/components/IndianCityField';
+import VerifiedPhoneEditor from '@/app/components/VerifiedPhoneEditor';
 import { getCanonicalIndianCity, matchesIndianCity } from '@/lib/indian-cities';
 import { formatCompactOpdSessions, formatOpdSessions, getOpdSessions, OpdSession } from '@/lib/opd-schedule';
 import { isValidPassword, PASSWORD_PATTERN, PASSWORD_REQUIREMENT } from '@/lib/password-policy';
@@ -462,6 +463,7 @@ function DoctorBookingDirectoryContent() {
   const [authError, setAuthError] = useState('');
   const [authNotice, setAuthNotice] = useState('');
   const [showProfileMenu, setShowProfileMenu] = useState(false);
+  const [showPatientPhoneEditor, setShowPatientPhoneEditor] = useState(false);
   const profileMenuRef = useRef<HTMLDivElement>(null);
   const patientAccountProfileUserIdRef = useRef<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
@@ -561,6 +563,7 @@ function DoctorBookingDirectoryContent() {
       setPatientAccountProfileLoading(Boolean(user));
       setPatientAccountProfileError('');
       setReferralCopyMessage('');
+      setShowPatientPhoneEditor(false);
     }
     if (!user) {
       setCallAlertPreference(null);
@@ -2671,7 +2674,7 @@ function DoctorBookingDirectoryContent() {
                   </button>
 
                   {showProfileMenu && (
-                    <div className="absolute right-0 top-[calc(100%+0.75rem)] z-40 w-72 max-w-[calc(100vw-2rem)] overflow-hidden rounded-3xl border border-slate-200 bg-white text-slate-900 shadow-2xl shadow-slate-950/20">
+                    <div className="absolute right-0 top-[calc(100%+0.75rem)] z-40 max-h-[min(80vh,40rem)] w-72 max-w-[calc(100vw-2rem)] overflow-y-auto rounded-3xl border border-slate-200 bg-white text-slate-900 shadow-2xl shadow-slate-950/20">
                       <div className="border-b border-slate-800 bg-slate-950 px-4 py-4 text-white">
                         <div className="flex items-start gap-3">
                           <span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-blue-600 text-base font-black text-white ring-1 ring-blue-400">
@@ -2685,6 +2688,34 @@ function DoctorBookingDirectoryContent() {
                         <p className="mt-3 text-[10px] font-bold uppercase tracking-[0.16em] text-slate-400">Patient account</p>
                       </div>
                       <div className="space-y-1 p-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowPatientPhoneEditor((open) => !open)}
+                        aria-expanded={showPatientPhoneEditor}
+                        className="flex w-full items-center gap-3 rounded-2xl px-3 py-3 text-left text-xs font-bold text-slate-600 transition-colors hover:bg-blue-50 hover:text-blue-700 cursor-pointer"
+                      >
+                        <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-blue-50 text-blue-600">
+                          <Phone className="h-4 w-4" />
+                        </span>
+                        <span>{showPatientPhoneEditor ? 'Close mobile editor' : 'Update account mobile'}</span>
+                      </button>
+                      {showPatientPhoneEditor && (
+                        <div className="rounded-2xl bg-slate-50 p-3">
+                          <VerifiedPhoneEditor
+                            audience="patient"
+                            client={patientSupabase}
+                            initialPhone={
+                              typeof currentUser.user_metadata?.phone === 'string'
+                                ? currentUser.user_metadata.phone
+                                : currentUser.phone || ''
+                            }
+                            onVerified={(updatedPhone, user) => {
+                              applyAuthenticatedUser(user);
+                              setPhone(updatedPhone);
+                            }}
+                          />
+                        </div>
+                      )}
                       {globalFreeModeEnabled === false && (
                       <div className="space-y-3 rounded-2xl bg-blue-50 px-3 py-3">
                         <div className="flex items-center justify-between gap-3">

@@ -38,8 +38,9 @@ FastAPI logs only a masked sender number, message ID, text length, and Meta deli
 status/error code; it does not log the message body or full phone number.
 
 Patient sign-in uses the registered email or mobile number with the account password.
-WhatsApp OTPs are used only to verify a mobile number during registration and to reset
-a forgotten password. The FastAPI `POST /send-whatsapp-otp` endpoint accepts
+WhatsApp OTPs verify mobile numbers during registration and authenticated profile updates,
+and reset forgotten passwords; they are not used for sign-in. The FastAPI
+`POST /send-whatsapp-otp` endpoint accepts
 `{"phoneNumber":"+919876543210","purpose":"registration"}` (or
 `"purpose":"password_reset"`) and sends the `auth_login_otp` template in `en_US`.
 It stores a purpose-scoped keyed hash, enforces a 60-second per-number cooldown across
@@ -49,6 +50,18 @@ Apply `20261114000100_add_whatsapp_login_otps.sql` and
 then apply `20261124000100_scope_whatsapp_otps_and_phone_lookup.sql` for purpose-scoped
 registration/reset OTPs and mobile-number password sign-in, followed by
 `20261124000200_enforce_whatsapp_otp_recipient_cooldown.sql` for the shared resend limit.
+
+Clinic/reception accounts sign in with their email or verified mobile number and password;
+mobile sign-in does not use OTP. Clinic registration verifies the account owner's mobile
+number by WhatsApp OTP, and clinic password recovery uses the same number and an OTP. Apply
+`supabase/migrations/20261125000100_add_clinic_phone_otp_account_lookup.sql` after the
+shared OTP migrations so the server can locate clinic-owner accounts by their verified
+mobile number. Then apply `supabase/migrations/20261125000200_allow_whatsapp_phone_update_otp.sql`
+to enable OTP-verified phone changes in doctor/reception and patient profiles. Finally apply
+`supabase/migrations/20261125000300_prefer_verified_profile_mobile.sql` so the most
+recent OTP-verified profile mobile is used for sign-in and recovery. The same number may
+be linked once to a clinic account and once to a patient account, but not to multiple
+accounts of the same type. The clinic reception contact phone remains a separate optional field.
 
 ## WhatsApp token booking notifications
 
