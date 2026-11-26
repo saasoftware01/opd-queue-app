@@ -463,6 +463,7 @@ function DoctorBookingDirectoryContent() {
   const [authError, setAuthError] = useState('');
   const [authNotice, setAuthNotice] = useState('');
   const [showProfileMenu, setShowProfileMenu] = useState(false);
+  const [showPatientLogoutConfirmation, setShowPatientLogoutConfirmation] = useState(false);
   const [showPatientPhoneEditor, setShowPatientPhoneEditor] = useState(false);
   const profileMenuRef = useRef<HTMLDivElement>(null);
   const patientAccountProfileUserIdRef = useRef<string | null>(null);
@@ -1186,12 +1187,19 @@ function DoctorBookingDirectoryContent() {
     }
   };
 
-  const handlePatientLogout = async () => {
+  const handlePatientLogout = () => {
+    setShowProfileMenu(false);
+    setAuthError('');
+    setShowPatientLogoutConfirmation(true);
+  };
+
+  const confirmPatientLogout = async () => {
     setAuthLoading(true);
     setAuthError('');
     try {
       const { error } = await patientSupabase.auth.signOut({ scope: 'local' });
       if (error) throw error;
+      setShowPatientLogoutConfirmation(false);
       applyAuthenticatedUser(null);
       setConfirmedTicket(null);
       setActiveTab('DIRECTORY');
@@ -1246,8 +1254,18 @@ function DoctorBookingDirectoryContent() {
         ticketsById.set(ticket.id, ticket as PatientHistoryTicket);
       }
 
+      const { start, end } = getClinicDayRange();
+      const clinicDayStart = new Date(start);
+      const clinicDayEnd = new Date(end);
       setHistoryTickets(
         [...ticketsById.values()]
+          .map((ticket) => {
+            const ticketDate = new Date(ticket.created_at);
+            const isFromAnotherDay = ticketDate < clinicDayStart || ticketDate >= clinicDayEnd;
+            return isFromAnotherDay && ['waiting', 'skipped'].includes(ticket.status)
+              ? { ...ticket, status: 'expired' }
+              : ticket;
+          })
           .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime())
           .slice(0, 25)
       );
@@ -3653,7 +3671,6 @@ function DoctorBookingDirectoryContent() {
                     {detailsDoctor.name.trim().split(/\s+/).slice(0, 2).map((part) => part.charAt(0)).join('').toUpperCase() || 'D'}
                   </span>
                   <div className="min-w-0">
-                    <p className="mb-1 text-[10px] font-bold uppercase tracking-[0.18em] text-blue-200">Doctor profile</p>
                     <h2 id="doctor-details-title" className="break-words text-xl font-black tracking-tight sm:text-2xl">{detailsDoctor.name}</h2>
                     <p className="mt-1 flex min-w-0 items-center gap-1.5 text-xs text-blue-100/80">
                       <Building2 className="h-3.5 w-3.5 shrink-0" />
@@ -3717,11 +3734,9 @@ function DoctorBookingDirectoryContent() {
                       <p className="text-[10px] font-medium text-slate-400">Where to find the doctor</p>
                     </div>
                   </div>
-                  <p className="text-sm font-bold text-slate-800">{detailsDoctor.clinic_name || 'Clinic'}</p>
-                  <p className="mt-1 text-xs text-slate-500">Room {detailsDoctor.room_number}</p>
                   {(detailsDoctor.clinic_address || detailsDoctor.clinic_city) ? (
                     <>
-                      <p className="mt-3 text-xs leading-5 text-slate-600">
+                      <p className="text-xs leading-5 text-slate-600">
                         {[detailsDoctor.clinic_address, detailsDoctor.clinic_city].filter(Boolean).join(', ')}
                       </p>
                       <a
@@ -3736,7 +3751,7 @@ function DoctorBookingDirectoryContent() {
                       </a>
                     </>
                   ) : (
-                    <p className="mt-3 text-xs text-slate-400">Clinic address not provided.</p>
+                    <p className="text-xs text-slate-400">Clinic address not provided.</p>
                   )}
                 </section>
 
@@ -3849,7 +3864,7 @@ function DoctorBookingDirectoryContent() {
 
       {showHistory && currentUser && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-xs">
-          <div className="max-h-[min(42rem,90vh)] w-full max-w-2xl overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl">
+          <div className="flex max-h-[min(42rem,90vh)] w-full max-w-2xl flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl">
             <div className="flex items-start justify-between border-b border-slate-100 bg-slate-50/80 px-5 py-4 sm:px-6">
               <div>
                 <span className="text-[10px] font-extrabold uppercase tracking-[0.18em] text-blue-600">Patient profile</span>
@@ -3866,7 +3881,7 @@ function DoctorBookingDirectoryContent() {
               </button>
             </div>
 
-            <div className="max-h-[calc(90vh-7.5rem)] overflow-y-auto p-5 sm:p-6">
+            <div className="min-h-0 flex-1 overflow-y-auto p-5 sm:p-6">
               {historyLoading ? (
                 <div className="py-12 text-center">
                   <div className="mx-auto mb-3 h-8 w-8 animate-spin rounded-full border-4 border-blue-600 border-t-transparent" />
@@ -4478,6 +4493,57 @@ function DoctorBookingDirectoryContent() {
           {scheduleTooltip.text}
         </div>,
         document.body
+      )}
+
+      {showPatientLogoutConfirmation && (
+        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-xs">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="patient-logout-confirmation-title"
+            className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl"
+          >
+            <div className="flex flex-col items-center text-center">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-50 text-blue-600">
+                <LogOut className="h-5 w-5" />
+              </div>
+              <div className="mt-4">
+                <h3 id="patient-logout-confirmation-title" className="text-base font-bold text-slate-900">
+                  Ready to sign out?
+                </h3>
+                <p className="mt-2 text-xs leading-5 text-slate-500">
+                  You can sign back in anytime to manage your bookings and profile.
+                </p>
+              </div>
+            </div>
+            {authError && (
+              <p role="alert" className="mt-4 rounded-xl bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">
+                {authError}
+              </p>
+            )}
+            <div className="mt-6 flex justify-center gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowPatientLogoutConfirmation(false);
+                  setAuthError('');
+                }}
+                disabled={authLoading}
+                className="cursor-pointer rounded-xl border border-slate-300 px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmPatientLogout()}
+                disabled={authLoading}
+                className="cursor-pointer rounded-xl bg-blue-600 px-4 py-2.5 text-xs font-bold text-white shadow-md hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {authLoading ? 'Signing out...' : 'Yes, Log Out'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
     </div>

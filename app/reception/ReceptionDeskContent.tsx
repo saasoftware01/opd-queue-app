@@ -149,6 +149,8 @@ export default function ReceptionDeskPage() {
   const [historyPage, setHistoryPage] = useState(0);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState('');
+  const [historyPdfLoading, setHistoryPdfLoading] = useState(false);
+  const [historyExportError, setHistoryExportError] = useState('');
   const [showCompleteModal, setShowCompleteModal] = useState(false);
   const [completionPaidAmount, setCompletionPaidAmount] = useState('');
   const [completionPaymentMode, setCompletionPaymentMode] = useState<'CASH' | 'UPI' | 'CARD' | 'OTHER' | 'NONE'>('CASH');
@@ -1167,7 +1169,7 @@ export default function ReceptionDeskPage() {
   const completedHistoryTickets = historyTickets.filter((ticket) => ticket.status === 'completed');
   const completedHistoryPaidTotal = completedHistoryTickets.reduce((total, ticket) => total + (ticket.paid_amount ?? 0), 0);
 
-  const handleDownloadHistory = () => {
+  const getHistoryExportData = () => {
     const columns = [
       'Token',
       'Patient Name',
@@ -1198,6 +1200,11 @@ export default function ReceptionDeskPage() {
       new Date(ticket.created_at).toLocaleString(),
       ticket.completed_at ? new Date(ticket.completed_at).toLocaleString() : '',
     ]);
+    return { columns, rows };
+  };
+
+  const handleDownloadHistory = () => {
+    const { columns, rows } = getHistoryExportData();
     const escapeCsv = (value: string | number) => `"${String(value).replaceAll('"', '""')}"`;
     const csv = [columns, ...rows].map((row) => row.map(escapeCsv).join(',')).join('\r\n');
     const blob = new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8' });
@@ -1207,6 +1214,43 @@ export default function ReceptionDeskPage() {
     link.download = `token-history-${historyStartDate}-to-${historyEndDate}.csv`;
     link.click();
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  };
+
+  const handleDownloadHistoryPdf = async () => {
+    setHistoryPdfLoading(true);
+    setHistoryExportError('');
+
+    try {
+      const [{ jsPDF }, { default: autoTable }] = await Promise.all([
+        import('jspdf'),
+        import('jspdf-autotable'),
+      ]);
+      const { columns, rows } = getHistoryExportData();
+      const pdf = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+      const leftMargin = 10;
+      const dateRange = `${new Date(`${historyStartDate}T00:00:00`).toLocaleDateString()} - ${new Date(`${historyEndDate}T00:00:00`).toLocaleDateString()}`;
+
+      pdf.setFontSize(16);
+      pdf.text('Token History', leftMargin, 14);
+      pdf.setFontSize(9);
+      pdf.text(`Doctor: ${currentDoctor?.name || 'This doctor'}`, leftMargin, 21);
+      pdf.text(`Date range: ${dateRange}`, leftMargin, 26);
+      autoTable(pdf, {
+        head: [columns],
+        body: rows.map((row) => row.map(String)),
+        startY: 31,
+        margin: { left: leftMargin, right: leftMargin },
+        styles: { fontSize: 6, cellPadding: 1.5, overflow: 'linebreak' },
+        headStyles: { fillColor: [30, 64, 175] },
+        theme: 'striped',
+      });
+      pdf.save(`token-history-${historyStartDate}-to-${historyEndDate}.pdf`);
+    } catch (error: unknown) {
+      console.error('Token history PDF export failed:', error);
+      setHistoryExportError('Unable to generate the PDF. Please try again.');
+    } finally {
+      setHistoryPdfLoading(false);
+    }
   };
 
   return (
@@ -1830,7 +1874,7 @@ export default function ReceptionDeskPage() {
                 Tokens issued to {currentDoctor?.name || 'this doctor'} · {new Date(`${historyStartDate}T00:00:00`).toLocaleDateString()} – {new Date(`${historyEndDate}T00:00:00`).toLocaleDateString()}
               </p>
             </div>
-            <div className="flex items-center justify-between gap-4 sm:justify-end">
+            <div className="flex flex-wrap items-center justify-between gap-2 sm:justify-end">
               <button
                 type="button"
                 onClick={handleDownloadHistory}
@@ -1840,8 +1884,23 @@ export default function ReceptionDeskPage() {
                 <Download className="h-4 w-4" />
                 Download CSV
               </button>
+              <button
+                type="button"
+                onClick={() => void handleDownloadHistoryPdf()}
+                disabled={historyLoading || historyPdfLoading || isHistoryRangeInvalid || filteredHistoryTickets.length === 0}
+                className="flex items-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-bold text-blue-700 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <FileText className="h-4 w-4" />
+                {historyPdfLoading ? 'Generating PDF...' : 'Download PDF'}
+              </button>
             </div>
           </div>
+
+          {historyExportError && (
+            <p role="alert" className="border-b border-rose-100 bg-rose-50 px-6 py-3 text-xs font-semibold text-rose-700">
+              {historyExportError}
+            </p>
+          )}
 
           <div className="grid grid-cols-1 gap-3 border-b border-slate-200 p-4 sm:grid-cols-2">
             <div className="rounded-2xl border border-blue-100 bg-blue-50/70 px-4 py-3">
