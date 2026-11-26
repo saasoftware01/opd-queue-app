@@ -9,8 +9,8 @@ export function getPatientWhatsAppPhone(user: {
   phone?: string | null;
   user_metadata?: { phone?: unknown } | null;
 }) {
-  return normalizeIndianMobile(user.phone)?.mobile
-    ?? normalizeIndianMobile(user.user_metadata?.phone)?.mobile
+  return normalizeIndianMobile(user.user_metadata?.phone)?.mobile
+    ?? normalizeIndianMobile(user.phone)?.mobile
     ?? null;
 }
 

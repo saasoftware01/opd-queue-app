@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase/client';
@@ -9,6 +9,10 @@ import { isValidPassword, PASSWORD_PATTERN, PASSWORD_REQUIREMENT } from '@/lib/p
 import IndianCityField from '@/app/components/IndianCityField';
 import { getCanonicalIndianCity } from '@/lib/indian-cities';
 import { Building2, Stethoscope, ArrowLeft, CheckCircle2, AlertCircle, ArrowRight } from 'lucide-react';
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
 export default function RegisterClinicPage() {
   const router = useRouter();
@@ -25,11 +29,74 @@ export default function RegisterClinicPage() {
   
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [ownerPhone, setOwnerPhone] = useState('');
+  const [ownerOtp, setOwnerOtp] = useState('');
+  const [ownerOtpSent, setOwnerOtpSent] = useState(false);
+  const [ownerOtpPhone, setOwnerOtpPhone] = useState('');
+  const [ownerOtpCooldownSeconds, setOwnerOtpCooldownSeconds] = useState(0);
   const [phone, setPhone] = useState('');
 
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
+
+  useEffect(() => {
+    if (ownerOtpCooldownSeconds <= 0) return;
+    const timer = window.setTimeout(
+      () => setOwnerOtpCooldownSeconds((seconds) => Math.max(0, seconds - 1)),
+      1000
+    );
+    return () => window.clearTimeout(timer);
+  }, [ownerOtpCooldownSeconds]);
+
+  const requestOwnerOtp = async (mobile: string) => {
+    const response = await fetch('/api/auth/whatsapp/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phoneNumber: mobile, purpose: 'registration', audience: 'clinic' }),
+    });
+    const result: unknown = await response.json();
+    const resultRecord = isRecord(result) ? result : null;
+    const resendAfterSeconds = typeof resultRecord?.resendAfterSeconds === 'number'
+      ? Math.max(1, Math.ceil(resultRecord.resendAfterSeconds))
+      : typeof resultRecord?.retryAfterSeconds === 'number'
+        ? Math.max(1, Math.ceil(resultRecord.retryAfterSeconds))
+        : 60;
+
+    if (!response.ok) {
+      setOwnerOtpCooldownSeconds(resendAfterSeconds);
+      throw new Error(
+        typeof resultRecord?.error === 'string'
+          ? resultRecord.error
+          : 'Unable to send a verification code. Please try again.'
+      );
+    }
+
+    setOwnerOtpSent(true);
+    setOwnerOtpPhone(mobile);
+    setOwnerOtp('');
+    setOwnerOtpCooldownSeconds(resendAfterSeconds);
+    setSuccessMsg(`A WhatsApp verification code was sent to +91 ${mobile}.`);
+  };
+
+  const handleOwnerOtpResend = async () => {
+    const mobile = ownerPhone.replace(/\D/g, '');
+    if (!/^[6-9]\d{9}$/.test(mobile)) {
+      setErrorMsg('Enter a valid 10-digit account owner mobile number.');
+      return;
+    }
+
+    setLoading(true);
+    setErrorMsg('');
+    setSuccessMsg('');
+    try {
+      await requestOwnerOtp(mobile);
+    } catch (error: unknown) {
+      setErrorMsg(getErrorMessage(error, 'Unable to resend the verification code.'));
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -43,16 +110,61 @@ export default function RegisterClinicPage() {
       setErrorMsg('Select a city from the Indian city suggestions.');
       return;
     }
+    const ownerMobile = ownerPhone.replace(/\D/g, '');
+    if (!/^[6-9]\d{9}$/.test(ownerMobile)) {
+      setErrorMsg('Enter a valid 10-digit account owner mobile number.');
+      return;
+    }
     setLoading(true);
     setErrorMsg('');
     setSuccessMsg('');
     setClinicCity(city);
 
     try {
+      if (!ownerOtpSent) {
+        await requestOwnerOtp(ownerMobile);
+        return;
+      }
+      if (ownerOtpPhone !== ownerMobile) {
+        throw new Error('Request a new verification code for the account owner mobile number.');
+      }
+      if (!/^\d{6}$/.test(ownerOtp.trim())) {
+        throw new Error('Enter the 6-digit WhatsApp verification code.');
+      }
+
+      const verifyResponse = await fetch('/api/auth/whatsapp/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          purpose: 'registration',
+          audience: 'clinic',
+          phoneNumber: ownerMobile,
+          otpCode: ownerOtp.trim(),
+        }),
+      });
+      const verifyResult: unknown = await verifyResponse.json();
+      const verifyRecord = isRecord(verifyResult) ? verifyResult : null;
+      if (!verifyResponse.ok) {
+        throw new Error(
+          typeof verifyRecord?.error === 'string'
+            ? verifyRecord.error
+            : 'Unable to verify the account owner mobile number.'
+        );
+      }
+      setOwnerOtpSent(false);
+      setOwnerOtpPhone('');
+      setOwnerOtp('');
+
       // 1. Attempt Sign Up
       const { data: authData, error: authError } = await supabase.auth.signUp({
         email: email.trim(),
         password: password,
+        options: {
+          data: {
+            account_type: 'clinic_owner',
+            phone: ownerMobile,
+          },
+        },
       });
 
       // Handle duplicate email error
@@ -434,6 +546,60 @@ export default function RegisterClinicPage() {
 
               <div>
                 <label className="block text-xs font-bold text-slate-700 uppercase">
+                  Account Owner Mobile Number *
+                </label>
+                <input
+                  type="tel"
+                  required
+                  inputMode="numeric"
+                  autoComplete="tel-national"
+                  value={ownerPhone}
+                  onChange={(event) => {
+                    setOwnerPhone(event.target.value.replace(/\D/g, '').slice(0, 10));
+                    setOwnerOtpSent(false);
+                    setOwnerOtpPhone('');
+                    setOwnerOtp('');
+                    setSuccessMsg('');
+                    if (errorMsg) setErrorMsg('');
+                  }}
+                  placeholder="10-digit mobile number"
+                  className="mt-1 w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:ring-2 focus:ring-blue-500 focus:outline-hidden"
+                />
+                <p className="mt-1 text-[10px] leading-4 text-slate-500">
+                  Used to verify your clinic account and reset its password.
+                </p>
+                {ownerOtpSent && (
+                  <div className="mt-3 space-y-2">
+                    <label htmlFor="clinic-owner-otp" className="block text-xs font-bold text-slate-700 uppercase">
+                      WhatsApp Verification Code *
+                    </label>
+                    <input
+                      id="clinic-owner-otp"
+                      type="text"
+                      required
+                      inputMode="numeric"
+                      autoComplete="one-time-code"
+                      value={ownerOtp}
+                      onChange={(event) => setOwnerOtp(event.target.value.replace(/\D/g, '').slice(0, 6))}
+                      placeholder="Enter 6-digit code"
+                      className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm tracking-[0.3em] text-slate-900 focus:ring-2 focus:ring-blue-500 focus:outline-hidden"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => void handleOwnerOtpResend()}
+                      disabled={loading || ownerOtpCooldownSeconds > 0}
+                      className="text-xs font-semibold text-blue-600 hover:text-blue-700 hover:underline disabled:cursor-not-allowed disabled:text-slate-400 disabled:no-underline"
+                    >
+                      {ownerOtpCooldownSeconds > 0
+                        ? `Resend code in ${ownerOtpCooldownSeconds}s`
+                        : 'Resend verification code'}
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase">
                   Reception Contact Phone (Optional)
                 </label>
                 <input
@@ -451,7 +617,11 @@ export default function RegisterClinicPage() {
               disabled={loading}
               className="w-full flex items-center justify-center gap-2 py-3.5 px-4 border border-transparent rounded-2xl shadow-md text-sm font-black text-white bg-blue-600 hover:bg-blue-700 focus:outline-hidden disabled:opacity-50 transition-all cursor-pointer"
             >
-              <span>{loading ? 'Setting up Workspace...' : 'Launch Dashboard'}</span>
+              <span>
+                {loading
+                  ? 'Please wait...'
+                  : ownerOtpSent ? 'Verify & Launch Dashboard' : 'Verify Mobile & Continue'}
+              </span>
               <ArrowRight className="w-4 h-4" />
             </button>
           </form>

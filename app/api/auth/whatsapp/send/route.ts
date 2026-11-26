@@ -11,6 +11,8 @@ import {
   WHATSAPP_TEST_PHONE_MOBILE,
 } from '@/lib/server/whatsapp-otp';
 import { findPatientPhoneAccount, isPatientPhoneAccount } from '@/lib/server/patient-phone-account';
+import { findClinicPhoneAccount } from '@/lib/server/clinic-phone-account';
+import { findPhoneUpdateConflict, getPhoneUpdateUser } from '@/lib/server/whatsapp-profile-phone';
 
 const META_GRAPH_API_VERSION = 'v27.0';
 const OTP_RESEND_COOLDOWN_SECONDS = 60;
@@ -52,13 +54,22 @@ export async function POST(request: Request) {
   }
 
   const phone = normalizeIndianMobile(body.phoneNumber);
-  const purpose = body.purpose === 'registration' || body.purpose === 'password_reset'
+  const purpose = body.purpose === 'registration'
+    || body.purpose === 'password_reset'
+    || body.purpose === 'phone_update'
     ? body.purpose
     : null;
+  const audienceValue = 'audience' in body ? body.audience : undefined;
+  const audience = audienceValue === undefined || audienceValue === 'patient'
+    ? 'patient'
+    : audienceValue === 'clinic'
+      ? 'clinic'
+      : null;
   if (!phone) {
     return jsonResponse({ error: 'Enter a valid 10-digit Indian mobile number.' }, 400);
   }
   if (!purpose) return jsonResponse({ error: 'A valid OTP purpose is required.' }, 400);
+  if (!audience) return jsonResponse({ error: 'A valid account type is required.' }, 400);
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -88,10 +99,40 @@ export async function POST(request: Request) {
     auth: { autoRefreshToken: false, persistSession: false },
   });
 
-  if (purpose === 'registration') {
-    const { account, ambiguous, error } = await findPatientPhoneAccount(admin, phone.mobile);
+  const findPhoneAccount = audience === 'patient' ? findPatientPhoneAccount : findClinicPhoneAccount;
+
+  if (purpose === 'phone_update') {
+    const { user, error } = await getPhoneUpdateUser(admin, request, audience);
     if (error) {
-      console.error('Patient registration account lookup failed:', error);
+      console.error(`${audience} phone-update account check failed:`, error);
+      return jsonResponse({ error: 'Unable to verify your account. Please try again.' }, 500);
+    }
+    if (!user) {
+      return jsonResponse({ error: 'Sign in to update your account mobile number.' }, 401);
+    }
+
+    const { alreadyLinked, conflict, error: accountLookupError } = await findPhoneUpdateConflict(
+      admin,
+      phone.mobile,
+      user.id,
+      audience
+    );
+    if (accountLookupError) {
+      console.error(`${audience} phone-update number lookup failed:`, accountLookupError);
+      return jsonResponse({ error: 'Unable to verify this mobile number.' }, 500);
+    }
+    if (conflict) {
+      return jsonResponse({ error: 'This mobile number is already registered. Enter a different number.' }, 409);
+    }
+    if (alreadyLinked) {
+      return jsonResponse({ error: 'This mobile number is already linked to your account.' }, 409);
+    }
+  }
+
+  if (purpose === 'registration') {
+    const { account, ambiguous, error } = await findPhoneAccount(admin, phone.mobile);
+    if (error) {
+      console.error(`${audience} registration account lookup failed:`, error);
       return jsonResponse({ error: 'Unable to verify this mobile number.' }, 500);
     }
     if (account || ambiguous) {
@@ -103,9 +144,9 @@ export async function POST(request: Request) {
   }
 
   if (purpose === 'password_reset') {
-    const { account, ambiguous, error } = await findPatientPhoneAccount(admin, phone.mobile);
+    const { account, ambiguous, error } = await findPhoneAccount(admin, phone.mobile);
     if (error) {
-      console.error('Patient password-reset account lookup failed:', error);
+      console.error(`${audience} password-reset account lookup failed:`, error);
       return jsonResponse({ error: 'Unable to prepare a password-reset code.' }, 500);
     }
     if (ambiguous || !account) {
@@ -115,7 +156,7 @@ export async function POST(request: Request) {
         resendAfterSeconds: OTP_RESEND_COOLDOWN_SECONDS,
       });
     }
-    if (account) {
+    if (account && audience === 'patient') {
       try {
         if (!(await isPatientPhoneAccount(admin, account))) {
           return jsonResponse({ success: true, expiresInSeconds: 180 });
