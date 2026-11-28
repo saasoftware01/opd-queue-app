@@ -8,9 +8,17 @@ import { patientSupabase } from '@/lib/supabase/patient-client';
 import IndianCityField from '@/app/components/IndianCityField';
 import VerifiedPhoneEditor from '@/app/components/VerifiedPhoneEditor';
 import { getCanonicalIndianCity, matchesIndianCity } from '@/lib/indian-cities';
-import { formatCompactOpdSessions, formatOpdSessions, getOpdSessions, OpdSession } from '@/lib/opd-schedule';
+import {
+  formatCompactOpdSessions,
+  formatDoctorSlotTiming,
+  formatOpdSessions,
+  getOpdSessions,
+  isDoctorSlotPastEnd,
+  OpdSession,
+} from '@/lib/opd-schedule';
+import type { DoctorSlot } from '@/lib/types';
 import { isValidPassword, PASSWORD_PATTERN, PASSWORD_REQUIREMENT } from '@/lib/password-policy';
-import { getClinicDateString, getClinicDateTimeParts, getClinicDayRange } from '@/lib/clinic-day';
+import { getClinicDateString, getClinicDateTimeParts } from '@/lib/clinic-day';
 import { 
   Search, 
   Stethoscope, 
@@ -105,6 +113,7 @@ interface DoctorDirectoryItem {
   opd_shift: string;
   opd_timing: string;
   opd_sessions: OpdSession[];
+  slots: DoctorSlot[];
   weekly_off_days: string[];
   opd_holiday_dates: string[];
   clinic_id: string;
@@ -123,7 +132,12 @@ interface DoctorDirectoryItem {
 interface ConfirmedTicket {
   id: string;
   patient_user_id?: string | null;
-  token_number: string;
+  token_number: number;
+  token_code: string;
+  booking_date: string;
+  slot_name: string;
+  slot_start_time: string;
+  slot_end_time: string;
   patient_name: string;
   phone: string;
   doctor_name: string;
@@ -141,7 +155,12 @@ interface SharedTrackingSnapshot {
   ticket: {
     id: string;
     doctor_id: string | null;
-    token_number: string;
+    token_number: number;
+    token_code: string;
+    booking_date: string;
+    slot_name: string;
+    slot_start_time: string;
+    slot_end_time: string;
     patient_name: string;
     status: string;
     created_at: string;
@@ -158,7 +177,12 @@ function isSharedTrackingSnapshot(value: unknown): value is SharedTrackingSnapsh
   const ticket = value.ticket;
   return typeof ticket.id === 'string'
     && (typeof ticket.doctor_id === 'string' || ticket.doctor_id === null)
-    && typeof ticket.token_number === 'string'
+    && typeof ticket.token_number === 'number'
+    && typeof ticket.token_code === 'string'
+    && typeof ticket.booking_date === 'string'
+    && typeof ticket.slot_name === 'string'
+    && typeof ticket.slot_start_time === 'string'
+    && typeof ticket.slot_end_time === 'string'
     && typeof ticket.patient_name === 'string'
     && typeof ticket.status === 'string'
     && typeof ticket.created_at === 'string'
@@ -169,10 +193,56 @@ function isSharedTrackingSnapshot(value: unknown): value is SharedTrackingSnapsh
     && typeof value.patients_ahead === 'number';
 }
 
+function getTerminalSharedTrackingSnapshot(value: unknown): SharedTrackingSnapshot | null {
+  if (!isObjectRecord(value) || !isObjectRecord(value.ticket)) return null;
+  const ticket = value.ticket;
+  if (
+    (ticket.status !== 'cancelled' && ticket.status !== 'expired')
+    || typeof ticket.id !== 'string'
+    || typeof ticket.token_code !== 'string'
+    || typeof ticket.booking_date !== 'string'
+    || typeof ticket.patient_name !== 'string'
+  ) {
+    return null;
+  }
+
+  const tokenNumber = typeof ticket.token_number === 'number' && Number.isFinite(ticket.token_number)
+    ? ticket.token_number
+    : Number.parseInt(ticket.token_code.match(/\d+$/)?.[0] || '0', 10);
+
+  return {
+    ticket: {
+      id: ticket.id,
+      doctor_id: typeof ticket.doctor_id === 'string' ? ticket.doctor_id : null,
+      token_number: Number.isFinite(tokenNumber) ? tokenNumber : 0,
+      token_code: ticket.token_code,
+      booking_date: ticket.booking_date,
+      slot_name: typeof ticket.slot_name === 'string' ? ticket.slot_name : 'OPD',
+      slot_start_time: typeof ticket.slot_start_time === 'string' ? ticket.slot_start_time : '',
+      slot_end_time: typeof ticket.slot_end_time === 'string' ? ticket.slot_end_time : '',
+      patient_name: ticket.patient_name,
+      status: ticket.status,
+      created_at: typeof ticket.created_at === 'string' ? ticket.created_at : '',
+      doctor_name: typeof ticket.doctor_name === 'string' ? ticket.doctor_name : 'Doctor',
+      room_number: typeof ticket.room_number === 'string' ? ticket.room_number : 'Room 1',
+      clinic_name: typeof ticket.clinic_name === 'string' ? ticket.clinic_name : 'Care Clinic',
+    },
+    now_serving_token: typeof value.now_serving_token === 'string' ? value.now_serving_token : null,
+    patients_ahead: typeof value.patients_ahead === 'number' && Number.isFinite(value.patients_ahead)
+      ? value.patients_ahead
+      : 0,
+  };
+}
+
 function toSharedConfirmedTicket(snapshot: SharedTrackingSnapshot): ConfirmedTicket {
   return {
     id: snapshot.ticket.id,
     token_number: snapshot.ticket.token_number,
+    token_code: snapshot.ticket.token_code,
+    booking_date: snapshot.ticket.booking_date,
+    slot_name: snapshot.ticket.slot_name,
+    slot_start_time: snapshot.ticket.slot_start_time,
+    slot_end_time: snapshot.ticket.slot_end_time,
     patient_name: snapshot.ticket.patient_name,
     phone: '',
     doctor_name: snapshot.ticket.doctor_name,
@@ -187,7 +257,9 @@ function toSharedConfirmedTicket(snapshot: SharedTrackingSnapshot): ConfirmedTic
 
 interface PatientHistoryTicket {
   id: string;
-  token_number: string;
+  token_number: number;
+  token_code: string;
+  booking_date: string;
   patient_name: string;
   status: string;
   created_at: string;
@@ -216,7 +288,10 @@ interface RazorpayPaymentResponse {
 
 interface VerifiedBookingTicket {
   id: string;
-  token_number: string;
+  token_number: number;
+  token_code: string;
+  slot_id: string;
+  booking_date: string;
   patient_name: string;
   phone_number: string | null;
   status: string;
@@ -228,7 +303,10 @@ interface VerifiedBookingTicket {
 function isVerifiedBookingTicket(value: unknown): value is VerifiedBookingTicket {
   if (!isObjectRecord(value)) return false;
   return typeof value.id === 'string'
-    && typeof value.token_number === 'string'
+    && typeof value.token_number === 'number'
+    && typeof value.token_code === 'string'
+    && typeof value.slot_id === 'string'
+    && typeof value.booking_date === 'string'
     && typeof value.patient_name === 'string'
     && (typeof value.phone_number === 'string' || value.phone_number === null)
     && typeof value.status === 'string'
@@ -298,10 +376,13 @@ async function fetchSharedTrackingSnapshot(credential: string): Promise<SharedTr
       : 'Unable to load this shared token.';
     throw new Error(message);
   }
-  if (!isSharedTrackingSnapshot(result)) {
+  const snapshot = isSharedTrackingSnapshot(result)
+    ? result
+    : getTerminalSharedTrackingSnapshot(result);
+  if (!snapshot) {
     throw new Error('The shared token response was invalid.');
   }
-  return result;
+  return snapshot;
 }
 
 const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -387,6 +468,11 @@ function isDoctorOpdActive(doctor: DoctorDirectoryItem, date: Date): boolean {
     && doctor.opd_sessions.some((session) => isWithinOpdSession(session, date));
 }
 
+function getWeekdayForClinicDate(dateValue: string): string {
+  const [year, month, day] = dateValue.split('-').map(Number);
+  return WEEKDAY_NAMES[new Date(Date.UTC(year, month - 1, day)).getUTCDay()];
+}
+
 function DoctorBookingDirectoryContent() {
   const searchParams = useSearchParams();
   const urlClinicId = searchParams?.get('clinic_id') || null;
@@ -433,6 +519,8 @@ function DoctorBookingDirectoryContent() {
   const [phone, setPhone] = useState('');
   const [patientAge, setPatientAge] = useState('');
   const [patientGender, setPatientGender] = useState('');
+  const bookingDate = getClinicDateString(currentTime);
+  const [selectedSlotId, setSelectedSlotId] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
 
@@ -1229,14 +1317,14 @@ function DoctorBookingDirectoryContent() {
       const cleanUserPhone = typeof userPhone === 'string' ? userPhone.replace(/\D/g, '') : '';
       const accountHistoryRequest = patientSupabase
         .from('tickets')
-        .select('id, token_number, patient_name, status, created_at, doctor_id')
+        .select('id, token_number, token_code, booking_date, patient_name, status, created_at, doctor_id')
         .eq('patient_user_id', currentUser.id)
         .order('created_at', { ascending: false })
         .limit(25);
       const phoneHistoryRequest = cleanUserPhone.length >= 10
         ? patientSupabase
           .from('tickets')
-          .select('id, token_number, patient_name, status, created_at, doctor_id')
+        .select('id, token_number, token_code, booking_date, patient_name, status, created_at, doctor_id')
           .eq('phone_number', cleanUserPhone)
           .order('created_at', { ascending: false })
           .limit(25)
@@ -1254,19 +1342,16 @@ function DoctorBookingDirectoryContent() {
         ticketsById.set(ticket.id, ticket as PatientHistoryTicket);
       }
 
-      const { start, end } = getClinicDayRange();
-      const clinicDayStart = new Date(start);
-      const clinicDayEnd = new Date(end);
+      const clinicDate = getClinicDateString();
       setHistoryTickets(
         [...ticketsById.values()]
-          .map((ticket) => {
-            const ticketDate = new Date(ticket.created_at);
-            const isFromAnotherDay = ticketDate < clinicDayStart || ticketDate >= clinicDayEnd;
-            return isFromAnotherDay && ['waiting', 'skipped'].includes(ticket.status)
+          .map((ticket) =>
+            ticket.booking_date < clinicDate && ['waiting', 'skipped'].includes(ticket.status)
               ? { ...ticket, status: 'expired' }
-              : ticket;
-          })
-          .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime())
+              : ticket
+          )
+          .sort((left, right) => right.booking_date.localeCompare(left.booking_date)
+            || new Date(right.created_at).getTime() - new Date(left.created_at).getTime())
           .slice(0, 25)
       );
     } catch (error: unknown) {
@@ -1285,6 +1370,9 @@ function DoctorBookingDirectoryContent() {
   const [copyTrackingLinkMessage, setCopyTrackingLinkMessage] = useState('');
   const [trackedDoctor, setTrackedDoctor] = useState<TrackedDoctorStatus | null>(null);
   const [cancelLoading, setCancelLoading] = useState(false);
+  const [showCancelBookingModal, setShowCancelBookingModal] = useState(false);
+  const [cancelBookingError, setCancelBookingError] = useState('');
+  const [cancelBookingSucceeded, setCancelBookingSucceeded] = useState(false);
   const [callAlertMessage, setCallAlertMessage] = useState('');
   const [callAlertLoading, setCallAlertLoading] = useState(false);
   const callAlertStatusRequestRef = useRef(0);
@@ -1566,18 +1654,19 @@ function DoctorBookingDirectoryContent() {
     async function loadDirectory() {
       try {
         if (directoryRefreshKey === 0) setLoading(true);
-        const { start, end } = getClinicDayRange();
-
         // Safe parallel queries using allSettled so one table never breaks the others
-        const [docRes, clinicsRes, deptsRes, ticketsRes, ratingsRes] = await Promise.allSettled([
+        const [docRes, clinicsRes, deptsRes, slotsRes, ticketsRes, ratingsRes] = await Promise.allSettled([
           patientSupabase.from('doctors').select('*').order('created_at', { ascending: false }),
           patientSupabase.from('clinics').select('id, name, city, address'),
           patientSupabase.from('departments').select('id, name'),
           patientSupabase
+            .from('doctor_slots')
+            .select('id, doctor_id, slot_name, start_time, end_time, is_active')
+            .eq('is_active', true),
+          patientSupabase
             .from('tickets')
             .select('id, doctor_id, status')
-            .gte('created_at', start)
-            .lt('created_at', end)
+            .eq('booking_date', getClinicDateString())
           ,
           patientSupabase
             .from('tickets')
@@ -1589,6 +1678,9 @@ function DoctorBookingDirectoryContent() {
         const docData: DoctorDirectoryRecord[] = docRes.status === 'fulfilled' && docRes.value.data ? docRes.value.data : [];
         const clinicsData: ClinicDirectoryRecord[] = clinicsRes.status === 'fulfilled' && clinicsRes.value.data ? clinicsRes.value.data : [];
         const deptsData: DepartmentDirectoryRecord[] = deptsRes.status === 'fulfilled' && deptsRes.value.data ? deptsRes.value.data : [];
+        if (slotsRes.status === 'rejected') throw slotsRes.reason;
+        if (slotsRes.value.error) throw slotsRes.value.error;
+        const slotsData: DoctorSlot[] = slotsRes.value.data || [];
         const todayTickets: QueueMetricTicket[] = ticketsRes.status === 'fulfilled' && ticketsRes.value.data ? ticketsRes.value.data : [];
         const ratingTickets: DoctorRatingTicket[] = ratingsRes.status === 'fulfilled' && ratingsRes.value.data ? ratingsRes.value.data : [];
 
@@ -1602,6 +1694,12 @@ function DoctorBookingDirectoryContent() {
 
         const clinicMap = new Map(clinicsData.map((clinic): [string, ClinicDirectoryRecord] => [clinic.id, clinic]));
         const deptMap = new Map(deptsData.map((department): [string, string] => [department.id, department.name]));
+        const slotsByDoctor = new Map<string, DoctorSlot[]>();
+        slotsData.forEach((slot) => {
+          const doctorSlots = slotsByDoctor.get(slot.doctor_id) || [];
+          doctorSlots.push(slot);
+          slotsByDoctor.set(slot.doctor_id, doctorSlots);
+        });
         const ratingMap = new Map<string, { total: number; count: number }>();
         ratingTickets.forEach((ticket) => {
           if (!ticket.doctor_id || ticket.rating == null) return;
@@ -1626,6 +1724,7 @@ function DoctorBookingDirectoryContent() {
             opd_shift: doc.opd_shift || 'Morning',
             opd_timing: doc.opd_timing || '10:00 AM - 01:30 PM',
             opd_sessions: getOpdSessions(doc.opd_sessions, doc.opd_shift, doc.opd_timing),
+            slots: slotsByDoctor.get(doc.id) || [],
             weekly_off_days: doc.weekly_off_days || [],
             opd_holiday_dates: doc.opd_holiday_dates || [],
             clinic_id: doc.clinic_id || clinic?.id || '',
@@ -1703,13 +1802,11 @@ function DoctorBookingDirectoryContent() {
       isRefreshingMetrics = true;
 
       try {
-        const { start, end } = getClinicDayRange();
         const [ticketsResult, ratingsResult] = await Promise.all([
           patientSupabase
             .from('tickets')
             .select('doctor_id, status')
-            .gte('created_at', start)
-            .lt('created_at', end),
+            .eq('booking_date', getClinicDateString()),
           patientSupabase
             .from('tickets')
             .select('doctor_id, rating')
@@ -1878,22 +1975,28 @@ function DoctorBookingDirectoryContent() {
           return;
         }
 
-        const { start, end } = getClinicDayRange();
-
-        const { data: currentT } = await patientSupabase
+        const { data: currentT, error: currentTicketError } = await patientSupabase
           .from('tickets')
-        .select('status, token_number, created_at, doctor_id, rating')
+          .select('status, token_number, token_code, booking_date, slot_id, doctor_id, priority, rating')
           .eq('id', activeTicketId)
           .single();
 
+        if (currentTicketError) throw currentTicketError;
+
         if (currentT) {
-          const currentTicketDate = new Date(currentT.created_at);
-          const ticketIsOutsideToday = currentTicketDate < new Date(start) || currentTicketDate >= new Date(end);
-          const displayStatus = ticketIsOutsideToday && ['waiting', 'skipped'].includes(currentT.status)
+          const ticketDatePassed = currentT.booking_date < getClinicDateString();
+          const displayStatus = ticketDatePassed && ['waiting', 'skipped'].includes(currentT.status)
             ? 'expired'
             : currentT.status;
 
-          setConfirmedTicket(prev => prev ? { ...prev, status: displayStatus, rating: currentT.rating } : null);
+          setConfirmedTicket((prev) => prev ? {
+            ...prev,
+            token_number: currentT.token_number,
+            token_code: currentT.token_code,
+            booking_date: currentT.booking_date,
+            status: displayStatus,
+            rating: currentT.rating,
+          } : null);
 
           if (displayStatus === 'expired') {
             setNowServingToken(null);
@@ -1901,27 +2004,41 @@ function DoctorBookingDirectoryContent() {
             return;
           }
 
-          const { data: inCabin } = await patientSupabase
-            .from('tickets')
-            .select('token_number')
-            .eq('doctor_id', currentT.doctor_id)
-            .eq('status', 'in-consultation')
-            .gte('created_at', start)
-            .lt('created_at', end)
-            .maybeSingle();
+          if (!currentT.doctor_id || !currentT.slot_id) {
+            setNowServingToken(null);
+            setPatientsAhead(0);
+            return;
+          }
 
-          setNowServingToken(inCabin?.token_number || 'None');
+          const [
+            { data: inCabin, error: inCabinError },
+            { data: waiting, error: waitingError },
+          ] = await Promise.all([
+            patientSupabase
+              .from('tickets')
+              .select('token_code')
+              .eq('doctor_id', currentT.doctor_id)
+              .eq('slot_id', currentT.slot_id)
+              .eq('booking_date', currentT.booking_date)
+              .eq('status', 'in-consultation')
+              .maybeSingle(),
+            patientSupabase
+              .from('tickets')
+              .select('token_number, priority')
+              .eq('doctor_id', currentT.doctor_id)
+              .eq('slot_id', currentT.slot_id)
+              .eq('booking_date', currentT.booking_date)
+              .eq('status', 'waiting'),
+          ]);
+          if (inCabinError) throw inCabinError;
+          if (waitingError) throw waitingError;
 
-          const { count } = await patientSupabase
-            .from('tickets')
-            .select('*', { count: 'exact', head: true })
-            .eq('doctor_id', currentT.doctor_id)
-            .eq('status', 'waiting')
-            .gte('created_at', start)
-            .lt('created_at', end)
-            .lt('created_at', currentT.created_at);
-
-          setPatientsAhead(count || 0);
+          setNowServingToken(inCabin?.token_code || null);
+          setPatientsAhead((waiting || []).filter((ticket) =>
+            ticket.priority === 'emergency'
+              ? currentT.priority !== 'emergency' || ticket.token_number < currentT.token_number
+              : currentT.priority !== 'emergency' && ticket.token_number < currentT.token_number
+          ).length);
         }
       } catch (err) {
         console.error('Queue sync error:', err);
@@ -1993,6 +2110,25 @@ function DoctorBookingDirectoryContent() {
     setErrorMsg('');
 
     try {
+      const selectedSlot = selectedDoctor.slots.find((slot) => slot.id === selectedSlotId && slot.is_active);
+      if (!selectedSlot) {
+        throw new Error('Select an available OPD slot before booking.');
+      }
+      const today = getClinicDateString();
+      if (bookingDate < today) {
+        throw new Error('Select today or a future date.');
+      }
+      const bookingWeekday = getWeekdayForClinicDate(bookingDate);
+      if (
+        selectedDoctor.opd_holiday_dates.includes(bookingDate)
+        || selectedDoctor.weekly_off_days.includes(bookingWeekday)
+      ) {
+        throw new Error('Bookings are unavailable for this doctor on the selected date.');
+      }
+      if (isDoctorSlotPastEnd(selectedSlot, bookingDate, currentTime)) {
+        throw new Error('The selected OPD slot has already ended.');
+      }
+
       const cleanPhone = phone.trim().replace(/\D/g, '');
       if (cleanPhone.length < 10) {
         throw new Error('Please enter a valid 10-digit mobile number.');
@@ -2021,20 +2157,18 @@ function DoctorBookingDirectoryContent() {
         throw new Error(`Bookings are unavailable for this doctor today (${closureReason}).`);
       }
 
-      const { start, end } = getClinicDayRange();
-
       const { data: existingTicket } = await patientSupabase
         .from('tickets')
-        .select('id, token_number, status')
+        .select('id, token_code, status')
         .eq('doctor_id', selectedDoctor.id)
-        .eq('phone_number', cleanPhone)
-        .gte('created_at', start)
-        .lt('created_at', end)
+        .eq('booking_date', bookingDate)
+        .or(`patient_user_id.eq.${currentUser.id},phone_number.eq.${cleanPhone}`)
         .in('status', ['waiting', 'in-consultation'])
+        .limit(1)
         .maybeSingle();
 
       if (existingTicket) {
-        throw new Error(`You already have an active Token (#${existingTicket.token_number}) in queue today.`);
+        throw new Error(`You already have an active token (#${existingTicket.token_code}) for this doctor today.`);
       }
 
       let ticketData: VerifiedBookingTicket;
@@ -2050,6 +2184,8 @@ function DoctorBookingDirectoryContent() {
         },
         body: JSON.stringify({
           doctor_id: selectedDoctor.id,
+          slot_id: selectedSlot.id,
+          booking_date: bookingDate,
           patient_name: patientName.trim(),
           phone_number: cleanPhone,
           patient_age: age,
@@ -2125,7 +2261,6 @@ function DoctorBookingDirectoryContent() {
       setConfirmedTicket({
         id: ticketData.id,
         patient_user_id: currentUser.id,
-        token_number: ticketData.token_number,
         patient_name: ticketData.patient_name,
         phone: ticketData.phone_number || cleanPhone,
         doctor_name: selectedDoctor.name,
@@ -2133,11 +2268,18 @@ function DoctorBookingDirectoryContent() {
         room_number: selectedDoctor.room_number,
         booking_amount: Number(ticketData.booking_fee_paid ?? 0),
         status: ticketData.status,
+        token_number: ticketData.token_number,
+        token_code: ticketData.token_code,
+        booking_date: ticketData.booking_date,
+        slot_name: selectedSlot.slot_name,
+        slot_start_time: selectedSlot.start_time,
+        slot_end_time: selectedSlot.end_time,
         doctor_id: selectedDoctor.id,
       });
       setIsSharedTicketViewer(false);
       setSharedTrackingCredential(null);
       setCopyTrackingLinkMessage('');
+      setSelectedSlotId('');
 
       void fetchPatientAccountProfile(currentUser.id)
         .then((profile) => {
@@ -2166,30 +2308,37 @@ function DoctorBookingDirectoryContent() {
     try {
       if (!currentUser) throw new Error('Sign in to track your bookings.');
 
-      const { start, end } = getClinicDayRange();
-
       const { data: tickets, error: ticketErr } = await patientSupabase
         .from('tickets')
         .select(`
           id,
           patient_user_id,
           doctor_id,
+          slot_id,
           token_number,
+          token_code,
+          booking_date,
           patient_name,
           phone_number,
           status,
           rating,
+          priority,
           created_at,
           doctors (
             name,
             room_number,
             clinic_name
+          ),
+          doctor_slots (
+            slot_name,
+            start_time,
+            end_time
           )
         `)
         .eq('patient_user_id', currentUser.id)
-        .gte('created_at', start)
-        .lt('created_at', end)
-        .in('status', ['waiting', 'in-consultation', 'completed', 'skipped', 'expired'])
+        .gte('booking_date', getClinicDateString())
+        .in('status', ['waiting', 'in-consultation', 'completed', 'skipped', 'cancelled', 'expired'])
+        .order('booking_date', { ascending: false })
         .order('created_at', { ascending: false });
 
       if (ticketErr) throw ticketErr;
@@ -2197,16 +2346,21 @@ function DoctorBookingDirectoryContent() {
       const doctorIds = [...new Set(patientTickets
         .map((ticket) => ticket.doctor_id)
         .filter((doctorId): doctorId is string => Boolean(doctorId)))];
-      let waitingQueue: { doctor_id: string | null; created_at: string }[] = [];
+      let waitingQueue: {
+        doctor_id: string | null;
+        slot_id: string | null;
+        booking_date: string;
+        token_number: number;
+        priority: string;
+      }[] = [];
 
       if (doctorIds.length > 0) {
         const { data: queue, error: queueError } = await patientSupabase
           .from('tickets')
-          .select('doctor_id, created_at')
+          .select('doctor_id, slot_id, booking_date, token_number, priority')
           .in('doctor_id', doctorIds)
           .eq('status', 'waiting')
-          .gte('created_at', start)
-          .lt('created_at', end);
+          .gte('booking_date', getClinicDateString());
 
         if (queueError) throw queueError;
         waitingQueue = queue || [];
@@ -2219,17 +2373,29 @@ function DoctorBookingDirectoryContent() {
         ticket.status === 'waiting' && ticket.doctor_id
           ? waitingQueue.filter((queuedTicket) =>
               queuedTicket.doctor_id === ticket.doctor_id
-              && queuedTicket.created_at < ticket.created_at
+              && queuedTicket.slot_id === ticket.slot_id
+              && queuedTicket.booking_date === ticket.booking_date
+              && (queuedTicket.priority === 'emergency'
+                ? ticket.priority !== 'emergency' || queuedTicket.token_number < ticket.token_number
+                : ticket.priority !== 'emergency' && queuedTicket.token_number < ticket.token_number)
             ).length
           : 0,
       ]));
       setPatientsAheadByTicketId(nextPatientsAhead);
       setTrackerTickets(patientTickets.map((ticket) => {
         const docInfo = ticket.doctors as TrackedDoctorDetails | null;
+        const slotInfo = Array.isArray(ticket.doctor_slots)
+          ? ticket.doctor_slots[0]
+          : ticket.doctor_slots;
         return {
           id: ticket.id,
           patient_user_id: ticket.patient_user_id,
           token_number: ticket.token_number,
+          token_code: ticket.token_code,
+          booking_date: ticket.booking_date,
+          slot_name: slotInfo?.slot_name || 'OPD',
+          slot_start_time: slotInfo?.start_time || '',
+          slot_end_time: slotInfo?.end_time || '',
           patient_name: ticket.patient_name,
           phone: ticket.phone_number || '',
           doctor_name: docInfo?.name || 'Doctor',
@@ -2285,7 +2451,10 @@ function DoctorBookingDirectoryContent() {
                 id,
                 patient_user_id,
                 doctor_id,
+                slot_id,
                 token_number,
+                token_code,
+                booking_date,
                 patient_name,
                 phone_number,
                 status,
@@ -2296,6 +2465,11 @@ function DoctorBookingDirectoryContent() {
                   name,
                   room_number,
                   clinic_name
+                ),
+                doctor_slots (
+                  slot_name,
+                  start_time,
+                  end_time
                 )
               `)
               .eq('id', ticketId)
@@ -2304,19 +2478,25 @@ function DoctorBookingDirectoryContent() {
 
             if (ownerLookupError) throw ownerLookupError;
             if (ownedTicket) {
-              const { start, end } = getClinicDayRange();
-              const ticketDate = new Date(ownedTicket.created_at);
-              const isOutsideToday = ticketDate < new Date(start) || ticketDate >= new Date(end);
-              const status = isOutsideToday && ['waiting', 'skipped'].includes(ownedTicket.status)
+              const status = ownedTicket.booking_date < getClinicDateString()
+                && ['waiting', 'skipped'].includes(ownedTicket.status)
                 ? 'expired'
                 : ownedTicket.status;
               const doctor = ownedTicket.doctors as TrackedDoctorDetails | null;
+              const slot = Array.isArray(ownedTicket.doctor_slots)
+                ? ownedTicket.doctor_slots[0]
+                : ownedTicket.doctor_slots;
               setIsSharedTicketViewer(false);
               setSharedTrackingCredential(null);
               setConfirmedTicket({
                 id: ownedTicket.id,
                 patient_user_id: ownedTicket.patient_user_id,
                 token_number: ownedTicket.token_number,
+                token_code: ownedTicket.token_code,
+                booking_date: ownedTicket.booking_date,
+                slot_name: slot?.slot_name || 'OPD',
+                slot_start_time: slot?.start_time || '',
+                slot_end_time: slot?.end_time || '',
                 patient_name: ownedTicket.patient_name,
                 phone: ownedTicket.phone_number || '',
                 doctor_name: doctor?.name || 'Doctor',
@@ -2355,7 +2535,10 @@ function DoctorBookingDirectoryContent() {
             id,
             patient_user_id,
             doctor_id,
+            slot_id,
             token_number,
+            token_code,
+            booking_date,
             patient_name,
             phone_number,
             status,
@@ -2366,6 +2549,11 @@ function DoctorBookingDirectoryContent() {
               name,
               room_number,
               clinic_name
+            ),
+            doctor_slots (
+              slot_name,
+              start_time,
+              end_time
             )
           `)
           .eq('id', ticketId)
@@ -2378,19 +2566,25 @@ function DoctorBookingDirectoryContent() {
           return;
         }
 
-        const { start, end } = getClinicDayRange();
-        const ticketDate = new Date(ticket.created_at);
-        const isOutsideToday = ticketDate < new Date(start) || ticketDate >= new Date(end);
-        const status = isOutsideToday && ['waiting', 'skipped'].includes(ticket.status)
+        const status = ticket.booking_date < getClinicDateString()
+          && ['waiting', 'skipped'].includes(ticket.status)
           ? 'expired'
           : ticket.status;
         const doctor = ticket.doctors as TrackedDoctorDetails | null;
+        const slot = Array.isArray(ticket.doctor_slots)
+          ? ticket.doctor_slots[0]
+          : ticket.doctor_slots;
 
         if (isActive) {
           setConfirmedTicket({
             id: ticket.id,
             patient_user_id: ticket.patient_user_id,
             token_number: ticket.token_number,
+            token_code: ticket.token_code,
+            booking_date: ticket.booking_date,
+            slot_name: slot?.slot_name || 'OPD',
+            slot_start_time: slot?.start_time || '',
+            slot_end_time: slot?.end_time || '',
             patient_name: ticket.patient_name,
             phone: ticket.phone_number || '',
             doctor_name: doctor?.name || 'Doctor',
@@ -2573,23 +2767,35 @@ function DoctorBookingDirectoryContent() {
   };
 
   // 6. Cancel Ticket
-  const handleCancelBooking = async () => {
+  const handleCancelBooking = () => {
     if (
       !confirmedTicket
       || !currentUser
       || confirmedTicket.patient_user_id !== currentUser.id
       || isSharedTicketViewer
     ) return;
-    const confirm = window.confirm('Are you sure you want to cancel this consultation token?');
-    if (!confirm) return;
+
+    setCancelBookingError('');
+    setCancelBookingSucceeded(false);
+    setShowCancelBookingModal(true);
+  };
+
+  const confirmCancelBooking = async () => {
+    if (
+      !confirmedTicket
+      || !currentUser
+      || confirmedTicket.patient_user_id !== currentUser.id
+      || isSharedTicketViewer
+    ) return;
 
     setCancelLoading(true);
+    setCancelBookingError('');
 
     try {
       const { error } = await patientSupabase
         .from('tickets')
         .update({ 
-          status: 'skipped', 
+          status: 'cancelled',
           notes: '[Cancelled by Patient Online]' 
         })
         .eq('id', confirmedTicket.id);
@@ -2599,9 +2805,9 @@ function DoctorBookingDirectoryContent() {
       setConfirmedTicket(null);
       setPatientName('');
       setPhone('');
-      alert('Your consultation token has been cancelled successfully.');
+      setCancelBookingSucceeded(true);
     } catch (err: unknown) {
-      alert(getErrorMessage(err, 'Unable to cancel token. Please contact the counter.'));
+      setCancelBookingError(getErrorMessage(err, 'Unable to cancel token. Please contact the counter.'));
     } finally {
       setCancelLoading(false);
     }
@@ -2914,7 +3120,9 @@ function DoctorBookingDirectoryContent() {
             
             {/* Dynamic Status Header */}
             <div className={`p-6 text-white text-center transition-all ${
-              confirmedTicket.status === 'expired'
+              confirmedTicket.status === 'cancelled'
+                ? 'bg-rose-600'
+                : confirmedTicket.status === 'expired'
                 ? 'bg-slate-600'
                 : confirmedTicket.status === 'skipped'
                 ? 'bg-amber-600'
@@ -2926,9 +3134,13 @@ function DoctorBookingDirectoryContent() {
                 ? 'bg-indigo-600'
                 : 'bg-slate-900'
             }`}>
-              <CheckCircle2 className="w-12 h-12 mx-auto mb-2 text-white/90" />
+              {confirmedTicket.status === 'cancelled'
+                ? <XCircle className="w-12 h-12 mx-auto mb-2 text-white/90" />
+                : <CheckCircle2 className="w-12 h-12 mx-auto mb-2 text-white/90" />}
               <h2 className="text-xl font-black tracking-tight">
-                {confirmedTicket.status === 'expired'
+                {confirmedTicket.status === 'cancelled'
+                  ? 'Token Cancelled'
+                  : confirmedTicket.status === 'expired'
                   ? 'Token Expired'
                   : confirmedTicket.status === 'skipped'
                   ? 'Token Skipped'
@@ -2941,7 +3153,9 @@ function DoctorBookingDirectoryContent() {
                   : 'Token Confirmed & Queued'}
               </h2>
               <p className="text-xs text-white/80 mt-0.5">
-                {confirmedTicket.status === 'expired'
+                {confirmedTicket.status === 'cancelled'
+                  ? 'This token has been cancelled and is no longer active.'
+                  : confirmedTicket.status === 'expired'
                   ? 'This token was not served on its booking day. Please book a new token if you still need a consultation.'
                   : confirmedTicket.status === 'skipped'
                   ? 'Please visit the reception counter to reactivate your token.'
@@ -2977,12 +3191,37 @@ function DoctorBookingDirectoryContent() {
                   Your Token Number
                 </span>
                 <span className="text-5xl font-black text-blue-600 tracking-tight font-mono">
-                  {confirmedTicket.token_number}
+                  {confirmedTicket.token_code}
                 </span>
+                <p className="mt-2 text-xs font-semibold text-slate-600">
+                  {confirmedTicket.slot_name}
+                  {confirmedTicket.slot_start_time && confirmedTicket.slot_end_time
+                    ? ` · ${formatDoctorSlotTiming({
+                      start_time: confirmedTicket.slot_start_time,
+                      end_time: confirmedTicket.slot_end_time,
+                    })}`
+                    : ''}
+                </p>
+                <p className="mt-1 text-[11px] text-slate-500">
+                  {new Date(`${confirmedTicket.booking_date}T12:00:00`).toLocaleDateString('en-IN', {
+                    day: 'numeric',
+                    month: 'long',
+                    year: 'numeric',
+                  })}
+                </p>
               </div>
 
               {/* LIVE QUEUE OR COMPLETED SUMMARY */}
-              {confirmedTicket.status === 'expired' ? (
+              {confirmedTicket.status === 'cancelled' ? (
+                <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-center">
+                  <div className="text-xs font-bold uppercase tracking-wide text-rose-800">
+                    Booking Cancelled
+                  </div>
+                  <p className="mt-2 text-xs leading-relaxed text-rose-700">
+                    This consultation token is no longer active.
+                  </p>
+                </div>
+              ) : confirmedTicket.status === 'expired' ? (
                 <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-center">
                   <div className="text-xs font-bold uppercase tracking-wide text-slate-700">
                     Token Not Served
@@ -3075,6 +3314,8 @@ function DoctorBookingDirectoryContent() {
                   <span className={`font-black uppercase text-xs ${
                     confirmedTicket.status === 'expired'
                       ? 'text-slate-600'
+                      : confirmedTicket.status === 'cancelled'
+                      ? 'text-rose-600'
                       : confirmedTicket.status === 'skipped'
                       ? 'text-amber-600'
                       : confirmedTicket.status === 'completed'
@@ -3083,7 +3324,9 @@ function DoctorBookingDirectoryContent() {
                       ? 'text-blue-600'
                       : 'text-amber-600'
                   }`}>
-                    {confirmedTicket.status === 'expired'
+                    {confirmedTicket.status === 'cancelled'
+                      ? 'Token Cancelled'
+                      : confirmedTicket.status === 'expired'
                       ? 'Token Expired'
                       : confirmedTicket.status === 'skipped'
                       ? '⚠️ Token Skipped'
@@ -3350,18 +3593,22 @@ function DoctorBookingDirectoryContent() {
                   const statusColor = isYourTurn
                     ? 'bg-emerald-50 text-emerald-700'
                     : ticket.status === 'waiting'
-                    ? 'bg-amber-50 text-amber-700'
-                    : ticket.status === 'in-consultation'
-                      ? 'bg-emerald-50 text-emerald-700'
-                      : ticket.status === 'completed'
-                        ? 'bg-blue-50 text-blue-700'
-                        : 'bg-slate-100 text-slate-600';
+                      ? 'bg-amber-50 text-amber-700'
+                      : ticket.status === 'cancelled'
+                        ? 'bg-rose-50 text-rose-700'
+                        : ticket.status === 'skipped'
+                          ? 'bg-amber-50 text-amber-700'
+                          : ticket.status === 'in-consultation'
+                            ? 'bg-emerald-50 text-emerald-700'
+                            : ticket.status === 'completed'
+                              ? 'bg-blue-50 text-blue-700'
+                              : 'bg-slate-100 text-slate-600';
 
                   return (
                     <article key={ticket.id} className="grid grid-cols-[3.25rem_minmax(0,1fr)] items-center gap-x-3 gap-y-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm transition hover:border-blue-200 hover:shadow-md sm:grid-cols-[3.25rem_minmax(0,1fr)_auto] sm:gap-x-4 sm:p-5">
                       <div className="flex h-14 w-[3.25rem] shrink-0 flex-col items-center justify-center rounded-xl bg-slate-950 text-white">
                         <span className="text-[9px] font-bold uppercase tracking-wide text-slate-400">Token</span>
-                        <span className="text-sm font-black leading-5">{ticket.token_number}</span>
+                        <span className="text-sm font-black leading-5">{ticket.token_code}</span>
                       </div>
                       <div className="min-w-0 space-y-1">
                         <div className="flex min-w-0 items-center justify-between gap-2">
@@ -3373,7 +3620,12 @@ function DoctorBookingDirectoryContent() {
                         </p>
                         <p className="truncate text-xs leading-5 text-slate-500">{ticket.clinic_name} · {ticket.room_number}</p>
                         <p className="text-[11px] leading-4 text-slate-400">
-                          Booked {ticket.created_at ? new Date(ticket.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'today'}
+                          {ticket.slot_name} · {ticket.slot_start_time && ticket.slot_end_time
+                            ? formatDoctorSlotTiming({
+                              start_time: ticket.slot_start_time,
+                              end_time: ticket.slot_end_time,
+                            })
+                            : 'OPD slot'} · {ticket.booking_date}
                         </p>
                       </div>
                       <button
@@ -3844,6 +4096,7 @@ function DoctorBookingDirectoryContent() {
                   onClick={() => {
                     setDetailsDoctor(null);
                     setSelectedDoctor(detailsDoctor);
+                    setSelectedSlotId('');
                     setErrorMsg('');
                     setAuthError('');
                     setAuthNotice('');
@@ -3904,22 +4157,24 @@ function DoctorBookingDirectoryContent() {
                     const statusLabel = ticket.status.replaceAll('-', ' ');
                     const statusClass = ticket.status === 'completed'
                       ? 'bg-emerald-50 text-emerald-700'
-                      : ticket.status === 'cancelled' || ticket.status === 'skipped'
+                      : ticket.status === 'cancelled'
                         ? 'bg-rose-50 text-rose-700'
-                        : ticket.status === 'expired'
-                          ? 'bg-slate-100 text-slate-600'
-                          : 'bg-blue-50 text-blue-700';
+                        : ticket.status === 'skipped'
+                          ? 'bg-amber-50 text-amber-700'
+                          : ticket.status === 'expired'
+                            ? 'bg-slate-100 text-slate-600'
+                            : 'bg-blue-50 text-blue-700';
 
                     return (
                       <div key={ticket.id} className="flex items-center justify-between gap-4 rounded-2xl border border-slate-200 bg-white p-3.5 shadow-sm">
                         <div className="flex min-w-0 items-center gap-3">
                           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-50 text-sm font-black text-blue-700">
-                            {ticket.token_number}
+                            {ticket.token_code}
                           </div>
                           <div className="min-w-0">
                             <p className="truncate text-sm font-black text-slate-800">{doctor?.name || 'Doctor consultation'}</p>
                             <p className="truncate text-[11px] text-slate-500">
-                              {ticket.patient_name} · {doctor?.clinic_name || 'Clinic'} · {new Date(ticket.created_at).toLocaleDateString()}
+                              {ticket.patient_name} · {doctor?.clinic_name || 'Clinic'} · {ticket.booking_date}
                             </p>
                           </div>
                         </div>
@@ -3963,6 +4218,49 @@ function DoctorBookingDirectoryContent() {
             )}
 
             <form onSubmit={handleBooking} className="space-y-4">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <p className="mb-1 text-xs font-bold uppercase tracking-wider text-slate-700">
+                    Booking Date
+                  </p>
+                  <p className="rounded-xl border border-slate-300 bg-slate-100 px-3 py-2.5 text-sm font-semibold text-slate-700">
+                    Today · {new Date(`${bookingDate}T12:00:00`).toLocaleDateString('en-IN')}
+                  </p>
+                </div>
+                <div>
+                  <label htmlFor="booking-slot" className="mb-1 block text-xs font-bold uppercase tracking-wider text-slate-700">
+                    OPD Slot *
+                  </label>
+                  <select
+                    id="booking-slot"
+                    required
+                    value={selectedSlotId}
+                    onChange={(event) => setSelectedSlotId(event.target.value)}
+                    className="w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2.5 text-sm text-slate-900 focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-blue-600"
+                  >
+                    <option value="" disabled>Select a slot</option>
+                    {selectedDoctor.slots.map((slot) => {
+                      const dateWeekday = getWeekdayForClinicDate(bookingDate);
+                      const clinicClosed = selectedDoctor.opd_holiday_dates.includes(bookingDate)
+                        || selectedDoctor.weekly_off_days.includes(dateWeekday);
+                      const unavailable = clinicClosed
+                        || isDoctorSlotPastEnd(slot, bookingDate, currentTime)
+                        || selectedDoctor.opd_status === 'PAUSED';
+                      return (
+                        <option key={slot.id} value={slot.id} disabled={unavailable}>
+                          {slot.slot_name} ({formatDoctorSlotTiming(slot)})
+                          {unavailable ? ' · unavailable' : ''}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </div>
+              </div>
+              {selectedDoctor.slots.length === 0 && (
+                <p className="text-xs font-semibold text-amber-700">
+                  No OPD slots are configured for this doctor yet.
+                </p>
+              )}
               <div>
                 <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
                   Patient Full Name *
@@ -4043,7 +4341,10 @@ function DoctorBookingDirectoryContent() {
               <div className="pt-2 flex gap-3">
                 <button
                   type="button"
-                  onClick={() => setSelectedDoctor(null)}
+                  onClick={() => {
+                    setSelectedDoctor(null);
+                    setSelectedSlotId('');
+                  }}
                   className="w-1/3 py-3 rounded-xl border border-slate-200 text-xs font-bold text-slate-600 hover:bg-slate-50 cursor-pointer"
                 >
                   Cancel
@@ -4493,6 +4794,72 @@ function DoctorBookingDirectoryContent() {
           {scheduleTooltip.text}
         </div>,
         document.body
+      )}
+
+      {showCancelBookingModal && (
+        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-xs">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="cancel-booking-confirmation-title"
+            className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl"
+          >
+            <div className="flex flex-col items-center text-center">
+              <div className={`flex h-10 w-10 items-center justify-center rounded-xl ${
+                cancelBookingSucceeded ? 'bg-emerald-50 text-emerald-600' : 'bg-blue-50 text-blue-600'
+              }`}>
+                {cancelBookingSucceeded
+                  ? <CheckCircle2 className="h-5 w-5" />
+                  : <XCircle className="h-5 w-5" />}
+              </div>
+              <div className="mt-4">
+                <h3 id="cancel-booking-confirmation-title" className="text-base font-bold text-slate-900">
+                  {cancelBookingSucceeded ? 'Token cancelled' : 'Cancel this booking?'}
+                </h3>
+                <p className="mt-2 text-xs leading-5 text-slate-500">
+                  {cancelBookingSucceeded
+                    ? 'Your consultation token has been cancelled successfully.'
+                    : 'Are you sure you want to cancel this consultation token?'}
+                </p>
+              </div>
+            </div>
+            {cancelBookingError && (
+              <p role="alert" className="mt-4 rounded-xl bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">
+                {cancelBookingError}
+              </p>
+            )}
+            <div className="mt-6 flex justify-center gap-3">
+              {cancelBookingSucceeded ? (
+                <button
+                  type="button"
+                  onClick={() => setShowCancelBookingModal(false)}
+                  className="cursor-pointer rounded-xl bg-blue-600 px-5 py-2.5 text-xs font-bold text-white shadow-md hover:bg-blue-700"
+                >
+                  Done
+                </button>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setShowCancelBookingModal(false)}
+                    disabled={cancelLoading}
+                    className="cursor-pointer rounded-xl border border-slate-300 px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Keep Booking
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void confirmCancelBooking()}
+                    disabled={cancelLoading}
+                    className="cursor-pointer rounded-xl bg-blue-600 px-4 py-2.5 text-xs font-bold text-white shadow-md hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {cancelLoading ? 'Cancelling...' : 'Yes, Cancel Booking'}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
       )}
 
       {showPatientLogoutConfirmation && (

@@ -36,13 +36,28 @@ alter table public.doctors
 alter table public.doctors
   add column if not exists opd_holiday_dates date[] not null default '{}';
 
+create table if not exists public.doctor_slots (
+  id uuid default gen_random_uuid() primary key,
+  doctor_id uuid references public.doctors(id) on delete cascade not null,
+  slot_name text not null,
+  start_time time not null,
+  end_time time not null,
+  is_active boolean not null default true,
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null,
+  constraint doctor_slots_doctor_name_key unique (doctor_id, slot_name),
+  constraint doctor_slots_distinct_times_check check (start_time <> end_time)
+);
+
 -- 4. Ticket Status enum & Tickets / Queue table
 create type public.ticket_status as enum ('waiting', 'in-consultation', 'completed', 'skipped', 'cancelled', 'expired');
 create type public.priority_type as enum ('normal', 'emergency', 'senior');
 
 create table if not exists public.tickets (
   id uuid default uuid_generate_v4() primary key,
-  token_number text not null, -- e.g., 'GEN-001'
+  token_number integer not null default 0,
+  token_code text not null default '', -- e.g., 'M-001'
+  slot_id uuid references public.doctor_slots(id) on delete set null,
+  booking_date date not null default ((now() at time zone 'Asia/Kolkata')::date),
   patient_name text not null,
   phone_number text,
   patient_age integer check (patient_age is null or patient_age between 0 and 120),
@@ -59,7 +74,9 @@ create table if not exists public.tickets (
   completed_at timestamp with time zone,
   created_at timestamp with time zone default timezone('utc'::text, now()) not null,
   constraint tickets_completion_after_booking_check
-    check (completed_at is null or completed_at > created_at)
+    check (completed_at is null or completed_at > created_at),
+  constraint tickets_doctor_slot_booking_token_key
+    unique (doctor_id, slot_id, booking_date, token_number)
 );
 
 alter table public.tickets
@@ -124,6 +141,7 @@ for each row execute function public.ensure_ticket_completion_after_booking();
 -- 5. Enable Row Level Security (RLS)
 alter table public.departments enable row level security;
 alter table public.doctors enable row level security;
+alter table public.doctor_slots enable row level security;
 alter table public.tickets enable row level security;
 
 -- 6. Create policies for public access (or authenticated staff)
@@ -133,6 +151,8 @@ create policy "Allow public insert/update on departments" on public.departments 
 
 create policy "Allow public read access on doctors" on public.doctors for select using (true);
 create policy "Allow public insert/update on doctors" on public.doctors for all using (true);
+
+create policy "Allow public read access on doctor slots" on public.doctor_slots for select using (true);
 
 create policy "Allow public read access on tickets" on public.tickets for select using (true);
 create policy "Allow public insert/update on tickets" on public.tickets for all using (true);

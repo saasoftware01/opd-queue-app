@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { getClinicDateString, getClinicDateTimeParts, getClinicDayRange } from '@/lib/clinic-day';
+import { getClinicDateString, getClinicDateTimeParts } from '@/lib/clinic-day';
 import { authenticatePatientRequest, isPatientAuthFailure } from '@/lib/server/patient-auth';
 import { getRazorpayConfiguration, razorpayRequest } from '@/lib/server/razorpay';
 import {
@@ -9,6 +9,8 @@ import {
 
 interface BookingOrderPayload {
   doctor_id?: unknown;
+  slot_id?: unknown;
+  booking_date?: unknown;
   patient_name?: unknown;
   phone_number?: unknown;
   patient_age?: unknown;
@@ -28,6 +30,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const allowedGenders = new Set(['female', 'male', 'other', 'prefer-not-to-say']);
 const weekdayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+function getWeekdayForDate(dateValue: string): string | null {
+  const [year, month, day] = dateValue.split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.toISOString().slice(0, 10) !== dateValue) return null;
+  return weekdayNames[date.getUTCDay()];
+}
 
 export async function POST(request: Request) {
   const auth = await authenticatePatientRequest(request);
@@ -49,12 +58,27 @@ export async function POST(request: Request) {
     return Response.json({ error: 'Invalid request body.' }, { status: 400 });
   }
 
-  const { doctor_id, patient_name, phone_number, patient_age, patient_gender } = requestBody as BookingOrderPayload;
+  const {
+    doctor_id,
+    slot_id,
+    booking_date,
+    patient_name,
+    phone_number,
+    patient_age,
+    patient_gender,
+  } = requestBody as BookingOrderPayload;
   const patientName = typeof patient_name === 'string' ? patient_name.trim() : '';
   const phoneNumber = typeof phone_number === 'string' ? phone_number.replace(/\D/g, '') : '';
+  const bookingDate = typeof booking_date === 'string' ? booking_date : '';
+  const bookingWeekday = /^\d{4}-\d{2}-\d{2}$/.test(bookingDate)
+    ? getWeekdayForDate(bookingDate)
+    : null;
   if (
     typeof doctor_id !== 'string'
     || !uuidPattern.test(doctor_id)
+    || typeof slot_id !== 'string'
+    || !uuidPattern.test(slot_id)
+    || !bookingWeekday
     || !patientName
     || patientName.length > 120
     || phoneNumber.length !== 10
@@ -65,7 +89,7 @@ export async function POST(request: Request) {
     || typeof patient_gender !== 'string'
     || !allowedGenders.has(patient_gender)
   ) {
-    return Response.json({ error: 'Valid patient and doctor details are required.' }, { status: 400 });
+    return Response.json({ error: 'Valid patient, doctor, booking date, and OPD slot details are required.' }, { status: 400 });
   }
 
   try {
@@ -85,12 +109,44 @@ export async function POST(request: Request) {
 
     const now = new Date();
     const clinicDate = getClinicDateString(now);
-    const weekday = weekdayNames[getClinicDateTimeParts(now).weekday];
+    if (bookingDate !== clinicDate) {
+      return Response.json({ error: 'For now, bookings are only available for today.' }, { status: 409 });
+    }
     if (
-      doctor.opd_holiday_dates?.includes(clinicDate)
-      || doctor.weekly_off_days?.includes(weekday)
+      doctor.opd_holiday_dates?.includes(bookingDate)
+      || doctor.weekly_off_days?.includes(bookingWeekday)
     ) {
-      return Response.json({ error: 'Bookings are unavailable for this doctor today.' }, { status: 409 });
+      return Response.json({ error: 'Bookings are unavailable for this doctor on the selected date.' }, { status: 409 });
+    }
+
+    const { data: slot, error: slotError } = await auth.admin
+      .from('doctor_slots')
+      .select('id, slot_name, start_time, end_time')
+      .eq('id', slot_id)
+      .eq('doctor_id', doctor.id)
+      .eq('is_active', true)
+      .maybeSingle();
+
+    if (slotError) {
+      console.error('Online booking slot lookup failed:', slotError);
+      return Response.json({ error: 'Unable to verify this OPD slot.' }, { status: 500 });
+    }
+    if (!slot) {
+      return Response.json({ error: 'The selected OPD slot is no longer available.' }, { status: 409 });
+    }
+    if (bookingDate === clinicDate) {
+      const currentParts = getClinicDateTimeParts(now);
+      const currentMinutes = currentParts.hour * 60 + currentParts.minute;
+      const [startHour, startMinute] = slot.start_time.slice(0, 5).split(':').map(Number);
+      const [endHour, endMinute] = slot.end_time.slice(0, 5).split(':').map(Number);
+      const startMinutes = startHour * 60 + startMinute;
+      const endMinutes = endHour * 60 + endMinute;
+      const slotHasEnded = startMinutes < endMinutes
+        ? currentMinutes >= endMinutes
+        : currentMinutes >= endMinutes && currentMinutes < startMinutes;
+      if (slotHasEnded) {
+        return Response.json({ error: 'The selected OPD slot has already ended.' }, { status: 409 });
+      }
     }
 
     const { data: clinic, error: clinicError } = await auth.admin
@@ -107,15 +163,14 @@ export async function POST(request: Request) {
       return Response.json({ error: 'This clinic is not available for online booking.' }, { status: 400 });
     }
 
-    const { start, end } = getClinicDayRange();
     const { data: existingTicket, error: activeTicketError } = await auth.admin
       .from('tickets')
-      .select('id, token_number')
+      .select('id, token_code')
       .eq('doctor_id', doctor.id)
-      .eq('phone_number', phoneNumber)
-      .gte('created_at', start)
-      .lt('created_at', end)
+      .eq('booking_date', bookingDate)
+      .or(`patient_user_id.eq.${auth.user.id},phone_number.eq.${phoneNumber}`)
       .in('status', ['waiting', 'in-consultation'])
+      .limit(1)
       .maybeSingle();
 
     if (activeTicketError) {
@@ -124,7 +179,7 @@ export async function POST(request: Request) {
     }
     if (existingTicket) {
       return Response.json({
-        error: `You already have an active token (#${existingTicket.token_number}) for this doctor today.`,
+        error: `You already have an active token (#${existingTicket.token_code}) for this doctor today.`,
       }, { status: 409 });
     }
 
@@ -135,17 +190,25 @@ export async function POST(request: Request) {
         p_clinic_id: clinic.id,
         p_doctor_id: doctor.id,
         p_department_id: doctor.department_id,
+        p_slot_id: slot.id,
+        p_booking_date: bookingDate,
         p_patient_name: patientName,
         p_phone_number: phoneNumber,
         p_patient_age: patient_age,
         p_patient_gender: patient_gender,
-        p_day_start: start,
-        p_day_end: end,
       }
     );
 
     if (bookingDecisionError) {
       console.error('Patient booking fee decision failed:', bookingDecisionError);
+      if (
+        bookingDecisionError.code === '23505'
+        && bookingDecisionError.message.includes('active token already exists')
+      ) {
+        return Response.json({
+          error: 'You already have an active token for this doctor today.',
+        }, { status: 409 });
+      }
       if (bookingDecisionError.code === 'PGRST202' || bookingDecisionError.code === '42883') {
         return Response.json({
           error: 'The booking fee policy is not installed in Supabase. Apply migration 20261114000700_apply_platform_booking_fee_policy.sql.',
@@ -168,11 +231,11 @@ export async function POST(request: Request) {
       return Response.json({ error: 'The booking fee policy returned an invalid response.' }, { status: 500 });
     }
     if (bookingDecision.mode === 'duplicate') {
-      const tokenNumber = typeof bookingDecision.token_number === 'string'
-        ? bookingDecision.token_number
+      const tokenCode = typeof bookingDecision.token_code === 'string'
+        ? bookingDecision.token_code
         : 'unknown';
       return Response.json({
-        error: `You already have an active token (#${tokenNumber}) for this doctor today.`,
+        error: `You already have an active token (#${tokenCode}) for this doctor today.`,
       }, { status: 409 });
     }
     if (bookingDecision.mode === 'free') {
@@ -185,7 +248,7 @@ export async function POST(request: Request) {
           notificationPhone,
           bookingDecision.ticket.id,
           bookingDecision.ticket.patient_name,
-          bookingDecision.ticket.token_number
+          bookingDecision.ticket.token_code
         );
       } catch (error) {
         console.error('Free token was booked, but its WhatsApp notification failed:', error);
@@ -226,6 +289,8 @@ export async function POST(request: Request) {
       clinic_id: clinic.id,
       doctor_id: doctor.id,
       department_id: doctor.department_id,
+      slot_id: slot.id,
+      booking_date: bookingDate,
       patient_name: patientName,
       phone_number: phoneNumber,
       patient_age,

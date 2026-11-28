@@ -1,3 +1,6 @@
+import { getClinicDateString, getClinicDateTimeParts } from '@/lib/clinic-day';
+import type { DoctorSlot } from '@/lib/types';
+
 export const OPD_SHIFTS = ['Morning', 'Afternoon', 'Evening', 'Night'] as const;
 export const OPD_SESSION_SHIFTS = ['Morning', 'Evening'] as const;
 
@@ -124,4 +127,54 @@ export function formatLegacyOpdTiming(sessions: OpdSession[]): string {
       `${formatOpdTime(start_time)} - ${formatOpdTime(end_time)}`
     )
     .join(' · ');
+}
+
+export function formatDoctorSlotTiming(slot: Pick<DoctorSlot, 'start_time' | 'end_time'>): string {
+  return `${formatOpdTime(slot.start_time.slice(0, 5))} - ${formatOpdTime(slot.end_time.slice(0, 5))}`;
+}
+
+export function isDoctorSlotPastEnd(
+  slot: Pick<DoctorSlot, 'start_time' | 'end_time'>,
+  bookingDate: string,
+  now = new Date()
+): boolean {
+  if (bookingDate !== getClinicDateString(now)) return false;
+  const { hour, minute } = getClinicDateTimeParts(now);
+  const currentMinutes = hour * 60 + minute;
+  const [startHour, startMinute] = slot.start_time.slice(0, 5).split(':').map(Number);
+  const [endHour, endMinute] = slot.end_time.slice(0, 5).split(':').map(Number);
+  const startMinutes = startHour * 60 + startMinute;
+  const endMinutes = endHour * 60 + endMinute;
+  return startMinutes < endMinutes
+    ? currentMinutes >= endMinutes
+    : currentMinutes >= endMinutes && currentMinutes < startMinutes;
+}
+
+export function getPreferredDoctorSlot(
+  slots: DoctorSlot[],
+  now = new Date()
+): DoctorSlot | null {
+  if (slots.length === 0) return null;
+  const { hour, minute } = getClinicDateTimeParts(now);
+  const currentMinutes = hour * 60 + minute;
+  const inProgress = slots.find((slot) => {
+    const [startHour, startMinute] = slot.start_time.slice(0, 5).split(':').map(Number);
+    const [endHour, endMinute] = slot.end_time.slice(0, 5).split(':').map(Number);
+    const startMinutes = startHour * 60 + startMinute;
+    const endMinutes = endHour * 60 + endMinute;
+    return startMinutes < endMinutes
+      ? currentMinutes >= startMinutes && currentMinutes < endMinutes
+      : currentMinutes >= startMinutes || currentMinutes < endMinutes;
+  });
+  if (inProgress) return inProgress;
+
+  const nextSlot = slots
+    .filter((slot) => {
+      const [startHour, startMinute] = slot.start_time.slice(0, 5).split(':').map(Number);
+      const startMinutes = startHour * 60 + startMinute;
+      return !isDoctorSlotPastEnd(slot, getClinicDateString(now), now) && startMinutes > currentMinutes;
+    })
+    .sort((left, right) => left.start_time.localeCompare(right.start_time))[0];
+
+  return nextSlot || [...slots].sort((left, right) => left.start_time.localeCompare(right.start_time))[0];
 }

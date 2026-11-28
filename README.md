@@ -118,6 +118,19 @@ Razorpay webhook URL as `/api/payments/razorpay/webhook`, subscribe to
 `payment.captured`, and set the matching signing secret as `RAZORPAY_WEBHOOK_SECRET`.
 Use an HTTPS public URL (or a secure tunnel during local development).
 
+## Independent OPD shift queues
+
+Apply `supabase/migrations/20261128000100_add_doctor_slot_queues.sql` after the existing
+doctor OPD-session and online-booking migrations. It creates `doctor_slots` from each
+doctor's configured OPD sessions, backfills existing tickets, and adds atomic,
+date-and-shift-scoped numbering to `tickets`. New patient bookings and reception
+walk-ins require a selected shift. Patient bookings are currently limited to today, and
+one patient may have only one active token per doctor per day across all shifts. Display
+codes use the shift initial (for example, `M-001` or `E-001`). Doctor and reception
+dashboards can switch between that doctor's shifts, and **Call Next** prioritizes
+emergency tickets before token number within the selected shift. Queue booking and
+calling remain on the existing Supabase/Next.js path; no FastAPI token service is needed.
+
 Patient **Forgot password?** sends a WhatsApp code to the registered mobile number;
 the user verifies it and chooses a new password. Staff and admin password recovery
 continues to use email links. Configure the Supabase Site URL and allowed redirect

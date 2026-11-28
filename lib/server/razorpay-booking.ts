@@ -122,8 +122,11 @@ export async function completeRazorpayBookingPayment(
     clinic_id: bookingPayment.clinic_id,
     doctor_id: bookingPayment.doctor_id,
     department_id: bookingPayment.department_id,
+    slot_id: bookingPayment.slot_id,
+    booking_date: bookingPayment.booking_date,
     patient_user_id: bookingPayment.patient_user_id,
-    token_number: 'T',
+    token_number: 0,
+    token_code: '',
     patient_name: bookingPayment.patient_name,
     phone_number: bookingPayment.phone_number,
     patient_age: bookingPayment.patient_age,
@@ -135,7 +138,7 @@ export async function completeRazorpayBookingPayment(
   const { data: insertedTicket, error: ticketError } = await admin
     .from('tickets')
     .upsert(ticketValues, { onConflict: 'booking_payment_id', ignoreDuplicates: true })
-    .select('id, token_number, patient_name, phone_number, status, created_at, doctor_id, booking_fee_paid')
+    .select('id, token_number, token_code, slot_id, booking_date, patient_name, phone_number, status, created_at, doctor_id, booking_fee_paid')
     .maybeSingle();
 
   if (ticketError) {
@@ -147,7 +150,7 @@ export async function completeRazorpayBookingPayment(
     ? { data: insertedTicket, error: null }
     : await admin
       .from('tickets')
-      .select('id, token_number, patient_name, phone_number, status, created_at, doctor_id, booking_fee_paid')
+      .select('id, token_number, token_code, slot_id, booking_date, patient_name, phone_number, status, created_at, doctor_id, booking_fee_paid')
       .eq('booking_payment_id', bookingPayment.id)
       .single();
 
@@ -175,7 +178,7 @@ export async function completeRazorpayBookingPayment(
           notificationPhone,
           ticket.id,
           ticket.patient_name,
-          ticket.token_number
+          ticket.token_code
         );
       }
     } catch (error) {

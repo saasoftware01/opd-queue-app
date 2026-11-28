@@ -37,7 +37,7 @@ import {
   ChevronRight,
   MapPin,
 } from 'lucide-react';
-import { Department, Doctor } from '@/lib/types';
+import { Department, Doctor, DoctorSlot } from '@/lib/types';
 import { getClinicDateRange, getClinicDateString, getClinicDayRange } from '@/lib/clinic-day';
 import {
   formatLegacyOpdTiming,
@@ -45,6 +45,8 @@ import {
   OPD_SESSION_SHIFTS,
   OPD_TIME_OPTIONS,
   OPD_SHIFTS,
+  getPreferredDoctorSlot,
+  formatDoctorSlotTiming,
   OpdSessionShift,
   OpdSession,
 } from '@/lib/opd-schedule';
@@ -55,6 +57,7 @@ import VerifiedPhoneEditor from '@/app/components/VerifiedPhoneEditor';
 import { getCanonicalIndianCity } from '@/lib/indian-cities';
 
 interface ExtendedDoctor extends Doctor {
+  slots: DoctorSlot[];
   clinic_id?: string | null;
   clinic_name?: string;
   consultation_fee?: number;
@@ -76,7 +79,10 @@ interface ClinicLocation {
 
 interface QueueTicket {
   id: string;
-  token_number: string;
+  token_number: number;
+  token_code: string;
+  slot_id: string | null;
+  booking_date: string;
   patient_name: string;
   phone_number: string | null;
   patient_age?: number;
@@ -100,15 +106,11 @@ interface QueueTicket {
     name: string;
     room_number: string;
   } | null;
+  doctor_slots?: Pick<DoctorSlot, 'slot_name' | 'start_time' | 'end_time'> | null;
 }
 
 const HISTORY_PAGE_SIZE = 10;
 const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-
-function getTokenNumber(tokenNumber: string): number {
-  const match = tokenNumber.match(/(\d+)$/);
-  return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
-}
 
 function formatCurrency(amount: number): string {
   return `₹${amount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -124,9 +126,14 @@ export default function ReceptionDeskPage() {
   const [doctors, setDoctors] = useState<ExtendedDoctor[]>([]);
   const [clinics, setClinics] = useState<ClinicLocation[]>([]);
   const [selectedDoctorId, setSelectedDoctorId] = useState<string>('');
+  const [selectedSlotId, setSelectedSlotId] = useState<string>('');
   const currentDoctor = useMemo(
     () => doctors.find((doctor) => doctor.id === selectedDoctorId) || null,
     [doctors, selectedDoctorId]
+  );
+  const currentSlot = useMemo(
+    () => currentDoctor?.slots.find((slot) => slot.id === selectedSlotId) || null,
+    [currentDoctor, selectedSlotId]
   );
   const currentClinic = useMemo(
     () => clinics.find((clinic) => clinic.id === currentDoctor?.clinic_id) || null,
@@ -372,15 +379,29 @@ export default function ReceptionDeskPage() {
           throw new Error('This account is not associated with a clinic. Sign in with a clinic owner account.');
         }
 
-        const [docRes, deptRes] = await Promise.all([
+        const [docRes, deptRes, slotsRes] = await Promise.all([
           supabase.from('doctors').select('*, departments(*)').in('clinic_id', clinicIds).order('name'),
-          supabase.from('departments').select('*').order('name')
+          supabase.from('departments').select('*').order('name'),
+          supabase
+            .from('doctor_slots')
+            .select('id, doctor_id, slot_name, start_time, end_time, is_active')
+            .eq('is_active', true)
         ]);
 
         if (docRes.error) throw docRes.error;
         if (deptRes.error) throw deptRes.error;
+        if (slotsRes.error) throw slotsRes.error;
 
-        const docs = (docRes.data || []) as ExtendedDoctor[];
+        const slotsByDoctor = new Map<string, DoctorSlot[]>();
+        (slotsRes.data || []).forEach((slot) => {
+          const currentSlots = slotsByDoctor.get(slot.doctor_id) || [];
+          currentSlots.push(slot);
+          slotsByDoctor.set(slot.doctor_id, currentSlots);
+        });
+        const docs = (docRes.data || []).map((doctor) => ({
+          ...doctor,
+          slots: slotsByDoctor.get(doctor.id) || [],
+        })) as ExtendedDoctor[];
         setClinics((clinics || []) as ClinicLocation[]);
         setDoctors(docs);
         setDepartments(deptRes.data || []);
@@ -391,6 +412,14 @@ export default function ReceptionDeskPage() {
             : docs[0].id;
           
           setSelectedDoctorId(targetDocId);
+          const targetDoctor = docs.find((doctor) => doctor.id === targetDocId);
+          setSelectedSlotId(targetDoctor ? getPreferredDoctorSlot(targetDoctor.slots)?.id || '' : '');
+          if (!targetDoctor?.slots.length) {
+            setQueueTickets([]);
+            setSkippedTickets([]);
+            setCurrentPatient(null);
+            setPreviousDayConsultation(null);
+          }
         }
       } catch (err: unknown) {
         console.error('Initialization error:', err);
@@ -405,33 +434,31 @@ export default function ReceptionDeskPage() {
 
   // 2. Doctor selection change handler
   useEffect(() => {
-    if (!selectedDoctorId || doctors.length === 0) return;
-    const doc = doctors.find((d) => d.id === selectedDoctorId) || null;
-    if (doc) {
-      void fetchDoctorQueue(doc.department_id, doc.id);
-    }
-  }, [selectedDoctorId, doctors]);
+    if (!currentDoctor || !currentSlot) return;
+    void fetchDoctorQueue(currentDoctor.id, currentSlot.id);
+  }, [currentDoctor, currentSlot]);
 
   // 3. Realtime Queue Synchronization
   useEffect(() => {
-    if (!currentDoctor) return;
+    if (!currentDoctor || !currentSlot) return;
 
     let isActive = true;
     const departmentId = currentDoctor.department_id;
     const doctorId = currentDoctor.id;
+    const slotId = currentSlot.id;
     const channel = supabase
-      .channel(`reception-queue-sync-${departmentId}`)
+      .channel(`reception-queue-sync-${departmentId}-${slotId}`)
       .on(
         'postgres_changes',
         {
           event: '*',
           schema: 'public',
           table: 'tickets',
-          filter: `department_id=eq.${departmentId}`,
+          filter: `slot_id=eq.${slotId}`,
         },
         () => {
           if (isActive) {
-            void fetchDoctorQueue(departmentId, doctorId);
+            void fetchDoctorQueue(doctorId, slotId);
           }
         }
       )
@@ -445,33 +472,20 @@ export default function ReceptionDeskPage() {
       isActive = false;
       supabase.removeChannel(channel);
     };
-  }, [currentDoctor]);
+  }, [currentDoctor, currentSlot]);
 
   // Fetch queue items matching the active department/doctor
-  async function fetchDoctorQueue(deptId: string, docId: string) {
+  async function fetchDoctorQueue(docId: string, slotId: string) {
     try {
-      const { start, end } = getClinicDayRange();
-
-      const { data: expiredTickets, error: expirationError } = await supabase
-        .from('tickets')
-        .update({ status: 'expired' })
-        .eq('department_id', deptId)
-        .lt('created_at', start)
-        .in('status', ['waiting', 'skipped'])
-        .select('id');
-
-      if (expirationError) throw expirationError;
-      if (expiredTickets?.length) {
-        setSuccessMsg(`Expired ${expiredTickets.length} unserved token${expiredTickets.length === 1 ? '' : 's'} from the previous day.`);
-      }
+      const bookingDate = getClinicDateString();
 
       const { data, error } = await supabase
         .from('tickets')
-        .select('*, departments(name, code)')
-        .eq('department_id', deptId)
-        .gte('created_at', start)
-        .lt('created_at', end)
-        .order('created_at', { ascending: true });
+        .select('*, departments(name, code), doctor_slots(slot_name, start_time, end_time)')
+        .eq('doctor_id', docId)
+        .eq('slot_id', slotId)
+        .eq('booking_date', bookingDate)
+        .order('token_number', { ascending: true });
 
       if (error) throw error;
 
@@ -479,11 +493,11 @@ export default function ReceptionDeskPage() {
 
       const { data: previousActive, error: previousActiveError } = await supabase
         .from('tickets')
-        .select('*, departments(name, code)')
-        .eq('department_id', deptId)
+        .select('*, departments(name, code), doctor_slots(slot_name, start_time, end_time)')
         .eq('doctor_id', docId)
+        .eq('slot_id', slotId)
         .eq('status', 'in-consultation')
-        .lt('created_at', start)
+        .lt('booking_date', bookingDate)
         .order('created_at', { ascending: false })
         .limit(1)
         .maybeSingle();
@@ -505,7 +519,9 @@ export default function ReceptionDeskPage() {
       const skipped = tickets.filter((t) => t.status === 'skipped' && t.doctor_id === docId);
 
       waiting.sort((a, b) => {
-        const numberDifference = getTokenNumber(a.token_number) - getTokenNumber(b.token_number);
+        if (a.priority === 'emergency' && b.priority !== 'emergency') return -1;
+        if (a.priority !== 'emergency' && b.priority === 'emergency') return 1;
+        const numberDifference = a.token_number - b.token_number;
         if (numberDifference !== 0) return numberDifference;
         return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
       });
@@ -519,20 +535,20 @@ export default function ReceptionDeskPage() {
   }
 
   useEffect(() => {
-    if (!currentDoctor) return;
+    if (!currentDoctor || !currentSlot) return;
 
     let timeout: number;
     const scheduleNextDayRefresh = () => {
       const { end } = getClinicDayRange();
       timeout = window.setTimeout(() => {
-        void fetchDoctorQueue(currentDoctor.department_id, currentDoctor.id);
+        void fetchDoctorQueue(currentDoctor.id, currentSlot.id);
         scheduleNextDayRefresh();
       }, new Date(end).getTime() - Date.now() + 100);
     };
 
     scheduleNextDayRefresh();
     return () => window.clearTimeout(timeout);
-  }, [currentDoctor]);
+  }, [currentDoctor, currentSlot]);
 
   const historyDoctorId = currentDoctor?.id;
   const historyDepartmentId = currentDoctor?.department_id;
@@ -578,7 +594,7 @@ export default function ReceptionDeskPage() {
         while (hasMore) {
           const { data, error } = await supabase
             .from('tickets')
-            .select('*, departments(name, code), doctors(name, room_number)')
+            .select('*, departments(name, code), doctors(name, room_number), doctor_slots(slot_name, start_time, end_time)')
             .eq('department_id', historyDepartmentId)
             .eq('doctor_id', historyDoctorId)
             .gte('created_at', start)
@@ -631,7 +647,10 @@ export default function ReceptionDeskPage() {
 
   // ACTION 1: Single-Tap Call Next
   const handleCallNext = async () => {
-    if (!currentDoctor) return;
+    if (!currentDoctor || !currentSlot) {
+      setErrorMsg('Select a doctor shift before calling the next token.');
+      return;
+    }
     if (currentPatient) {
       setErrorMsg('Please complete or hold the current patient consultation first.');
       return;
@@ -643,46 +662,25 @@ export default function ReceptionDeskPage() {
     setSuccessMsg('');
 
     try {
-      const { start, end } = getClinicDayRange();
-      const { data: waitingTickets, error: waitingError } = await supabase
-        .from('tickets')
-        .select('id, token_number, patient_name, created_at')
-        .eq('department_id', currentDoctor.department_id)
-        .eq('status', 'waiting')
-        .gte('created_at', start)
-        .lt('created_at', end);
-
-      if (waitingError) throw waitingError;
-
-      const orderedWaitingTickets = (waitingTickets || []).sort((a, b) => {
-        const numberDifference = getTokenNumber(a.token_number) - getTokenNumber(b.token_number);
-        if (numberDifference !== 0) return numberDifference;
-        return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+      const { data, error: callError } = await supabase.rpc('call_next_ticket', {
+        p_doctor_id: currentDoctor.id,
+        p_slot_id: currentSlot.id,
+        p_booking_date: getClinicDateString(),
       });
-      const nextTicket = orderedWaitingTickets[0];
+      if (callError) throw callError;
+      const nextTicket = Array.isArray(data) ? data[0] : data;
 
       if (!nextTicket) {
         setErrorMsg('No waiting patients in queue.');
         return;
       }
-
-      const { error } = await supabase
-        .from('tickets')
-        .update({
-          status: 'in-consultation',
-          doctor_id: currentDoctor.id,
-          called_at: new Date().toISOString(),
-        })
-        .eq('id', nextTicket.id)
-        .eq('status', 'waiting');
-
-      if (error) throw error;
+      setCurrentPatient(nextTicket as QueueTicket);
 
       if (callChime && await callChime.ready) {
         playReceptionCallChime(callChime.audioContext);
       }
 
-      setSuccessMsg(`Called Token ${nextTicket.token_number} (${nextTicket.patient_name})`);
+      setSuccessMsg(`Called Token ${nextTicket.token_code} (${nextTicket.patient_name})`);
       try {
         const { data: { session }, error: sessionError } = await supabase.auth.getSession();
         if (sessionError) throw sessionError;
@@ -700,7 +698,7 @@ export default function ReceptionDeskPage() {
       } catch (pushError: unknown) {
         console.error('Patient call push notification failed:', pushError);
       }
-      fetchDoctorQueue(currentDoctor.department_id, currentDoctor.id);
+      if (currentSlot) fetchDoctorQueue(currentDoctor.id, currentSlot.id);
     } catch (err: unknown) {
       setErrorMsg(getErrorMessage(err, 'Failed to call next patient'));
     } finally {
@@ -753,11 +751,11 @@ export default function ReceptionDeskPage() {
       if (error) throw error;
 
       const recordedAmount = `₹${paidAmount.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
-      setSuccessMsg(`Consultation complete · ${currentPatient.token_number} · ${recordedAmount} recorded`);
+      setSuccessMsg(`Consultation complete · ${currentPatient.token_code} · ${recordedAmount} recorded`);
       setShowCompleteModal(false);
       setCurrentPatient(null);
       setPreviousDayConsultation(null);
-      fetchDoctorQueue(currentDoctor.department_id, currentDoctor.id);
+      if (currentSlot) fetchDoctorQueue(currentDoctor.id, currentSlot.id);
     } catch (err: unknown) {
       setCompletionError(getErrorMessage(err, 'Failed to complete consultation'));
     } finally {
@@ -783,10 +781,10 @@ export default function ReceptionDeskPage() {
 
       if (error) throw error;
 
-      setSuccessMsg(`Put Token ${currentPatient.token_number} on hold / skipped`);
+      setSuccessMsg(`Put Token ${currentPatient.token_code} on hold / skipped`);
       setCurrentPatient(null);
       setPreviousDayConsultation(null);
-      fetchDoctorQueue(currentDoctor.department_id, currentDoctor.id);
+      if (currentSlot) fetchDoctorQueue(currentDoctor.id, currentSlot.id);
     } catch (err: unknown) {
       setErrorMsg(getErrorMessage(err, 'Failed to hold ticket'));
     } finally {
@@ -821,8 +819,8 @@ export default function ReceptionDeskPage() {
 
       if (error) throw error;
 
-      setSuccessMsg(`Token ${ticket.token_number} has been reactivated and added to the waiting queue.`);
-      await fetchDoctorQueue(currentDoctor.department_id, currentDoctor.id);
+      setSuccessMsg(`Token ${ticket.token_code} has been reactivated and added to the waiting queue.`);
+      if (currentSlot) await fetchDoctorQueue(currentDoctor.id, currentSlot.id);
     } catch (err: unknown) {
       setErrorMsg(getErrorMessage(err, 'Failed to reactivate patient'));
     } finally {
@@ -834,6 +832,10 @@ export default function ReceptionDeskPage() {
   const handleAddWalkin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!patientName.trim() || !currentDoctor) return;
+    if (!currentSlot) {
+      setErrorMsg('Select an OPD shift before creating a walk-in token.');
+      return;
+    }
     if (!phoneNumber.trim()) {
       setErrorMsg('Please enter a phone number.');
       return;
@@ -849,9 +851,6 @@ export default function ReceptionDeskPage() {
     setSuccessMsg('');
 
     try {
-      const selectedDept = departments.find((d) => d.id === currentDoctor.department_id);
-      const prefix = isSoloClinicMode ? 'T' : (selectedDept?.code || 'OPD');
-
       // Save note cleanly or store null if receptionist left it blank
       const trimmedNote = notes.trim();
       const finalNotes = trimmedNote ? `[${paymentMode}] ${trimmedNote}` : null;
@@ -860,24 +859,25 @@ export default function ReceptionDeskPage() {
         .from('tickets')
         .insert([
           {
-            token_number: prefix,
             patient_name: patientName.trim(),
             phone_number: phoneNumber.trim(),
             patient_age: age,
             patient_gender: patientGender,
             department_id: currentDoctor.department_id,
             doctor_id: currentDoctor.id,
+            slot_id: currentSlot.id,
+            booking_date: getClinicDateString(),
             status: 'waiting',
             priority: 'normal',
             notes: finalNotes,
           },
         ])
-        .select('*, departments(name, code)')
+        .select('*, departments(name, code), doctor_slots(slot_name, start_time, end_time)')
         .single();
 
       if (insertError) throw insertError;
 
-      setSuccessMsg(`Token ${newTicket.token_number} issued to ${patientName}`);
+      setSuccessMsg(`Token ${newTicket.token_code} issued to ${patientName}`);
       setSelectedTicketForPrint(newTicket as QueueTicket);
       setShowWalkinModal(false);
 
@@ -889,7 +889,7 @@ export default function ReceptionDeskPage() {
       setNotes('');
       setPaymentMode('CASH');
 
-      fetchDoctorQueue(currentDoctor.department_id, currentDoctor.id);
+      if (currentSlot) fetchDoctorQueue(currentDoctor.id, currentSlot.id);
     } catch (err: unknown) {
       setErrorMsg(getErrorMessage(err, 'Failed to create walk-in token'));
     } finally {
@@ -899,36 +899,39 @@ export default function ReceptionDeskPage() {
 
   const handleQuickWalkin = async () => {
     if (!currentDoctor || actionLoading) return;
+    if (!currentSlot) {
+      setErrorMsg('Select an OPD shift before creating a quick token.');
+      return;
+    }
 
     setActionLoading(true);
     setErrorMsg('');
     setSuccessMsg('');
 
     try {
-      const selectedDept = departments.find((d) => d.id === currentDoctor.department_id);
-      const prefix = isSoloClinicMode ? 'T' : (selectedDept?.code || 'OPD');
       const { data: newTicket, error: insertError } = await supabase
         .from('tickets')
         .insert([{
-          token_number: prefix,
           patient_name: 'Walk-in Patient',
           phone_number: null,
           patient_age: null,
           patient_gender: null,
           department_id: currentDoctor.department_id,
           doctor_id: currentDoctor.id,
+          slot_id: currentSlot.id,
+          booking_date: getClinicDateString(),
           status: 'waiting',
           priority: 'normal',
           notes: '[COUNTER] Walk-in patient',
         }])
-        .select('*, departments(name, code)')
+        .select('*, departments(name, code), doctor_slots(slot_name, start_time, end_time)')
         .single();
 
       if (insertError) throw insertError;
 
-      setSuccessMsg(`Quick token ${newTicket.token_number} generated.`);
+      setSuccessMsg(`Quick token ${newTicket.token_code} generated.`);
       setSelectedTicketForPrint(newTicket as QueueTicket);
-      void fetchDoctorQueue(currentDoctor.department_id, currentDoctor.id);
+      if (currentSlot) void fetchDoctorQueue(currentDoctor.id, currentSlot.id);
     } catch (err: unknown) {
       setErrorMsg(getErrorMessage(err, 'Failed to generate quick walk-in token'));
     } finally {
@@ -1076,6 +1079,13 @@ export default function ReceptionDeskPage() {
         .eq('id', currentDoctor.id);
       if (error) throw error;
 
+      const { data: updatedSlots, error: slotsError } = await supabase
+        .from('doctor_slots')
+        .select('id, doctor_id, slot_name, start_time, end_time, is_active')
+        .eq('doctor_id', currentDoctor.id)
+        .eq('is_active', true);
+      if (slotsError) throw slotsError;
+
       setDoctors((previousDoctors) => previousDoctors.map((doctor) =>
         doctor.id === currentDoctor.id
           ? {
@@ -1086,6 +1096,7 @@ export default function ReceptionDeskPage() {
               opd_timing: legacyTiming,
               opd_shift: firstSession.shift,
               opd_sessions: newOpdSessions,
+              slots: updatedSlots || [],
               weekly_off_days: newWeeklyOffDays,
               opd_holiday_dates: newHolidayDates,
             }
@@ -1150,7 +1161,7 @@ export default function ReceptionDeskPage() {
       if (!query) return true;
 
       return [
-        ticket.token_number,
+        ticket.token_code,
         ticket.patient_name,
         ticket.phone_number,
         ticket.patient_age?.toString(),
@@ -1186,7 +1197,7 @@ export default function ReceptionDeskPage() {
       'Completed time',
     ];
     const rows = filteredHistoryTickets.map((ticket) => [
-      ticket.token_number,
+      ticket.token_code,
       ticket.patient_name,
       ticket.phone_number || '',
       ticket.patient_age ?? '',
@@ -1285,8 +1296,16 @@ export default function ReceptionDeskPage() {
                 <select
                   value={selectedDoctorId}
                   onChange={(e) => {
-                    const newId = e.target.value;    
-                    setSelectedDoctorId(newId);    
+                    const newId = e.target.value;
+                    const doctor = doctors.find((item) => item.id === newId);
+                    setSelectedDoctorId(newId);
+                    setSelectedSlotId(doctor ? getPreferredDoctorSlot(doctor.slots)?.id || '' : '');
+                    if (!doctor?.slots.length) {
+                      setQueueTickets([]);
+                      setSkippedTickets([]);
+                      setCurrentPatient(null);
+                      setPreviousDayConsultation(null);
+                    }
                     router.push(`${pathname}?doctor_id=${newId}`);
                   }}
                   className="shrink-0 whitespace-nowrap bg-transparent text-xs font-bold text-slate-900 rounded-lg pr-2 py-1 focus:outline-hidden"
@@ -1303,7 +1322,8 @@ export default function ReceptionDeskPage() {
             {/* Quick Add Walk-in Button */}
             <button
               onClick={() => setShowWalkinModal(true)}
-              className="flex shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-xl bg-blue-600 px-2.5 py-2 text-[10px] font-bold text-white shadow-sm transition-colors hover:bg-blue-700 sm:gap-1.5 sm:px-2.5 sm:py-2.5 sm:text-xs lg:gap-2 lg:px-4"
+              disabled={!currentDoctor || !currentSlot}
+              className="flex shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-xl bg-blue-600 px-2.5 py-2 text-[10px] font-bold text-white shadow-sm transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50 sm:gap-1.5 sm:px-2.5 sm:py-2.5 sm:text-xs lg:gap-2 lg:px-4"
             >
               <UserPlus className="h-3.5 w-3.5 shrink-0 sm:h-4 sm:w-4" />
               <span className="whitespace-nowrap">+ Add Walk-In</span>
@@ -1312,7 +1332,7 @@ export default function ReceptionDeskPage() {
             {/* Zero-typing walk-in token */}
             <button
               onClick={() => setShowQuickTokenModal(true)}
-              disabled={actionLoading || !currentDoctor}
+              disabled={actionLoading || !currentDoctor || !currentSlot}
               className="flex shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-xl bg-blue-600 px-2.5 py-2 text-[10px] font-bold text-white shadow-sm transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50 sm:gap-1.5 sm:px-2.5 sm:py-2.5 sm:text-xs lg:gap-2 lg:px-4"
               title="Generate a token without entering patient details"
             >
@@ -1458,11 +1478,47 @@ export default function ReceptionDeskPage() {
           </div>
         )}
 
+        {currentDoctor && (
+          <div className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <label htmlFor="reception-slot-select" className="block text-xs font-bold uppercase tracking-wide text-slate-600">
+                Active OPD shift
+              </label>
+              <p className="mt-1 text-xs text-slate-500">
+                Queue actions are limited to the selected shift.
+              </p>
+            </div>
+            {currentDoctor.slots.length > 0 ? (
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                <select
+                  id="reception-slot-select"
+                  value={selectedSlotId}
+                  onChange={(event) => setSelectedSlotId(event.target.value)}
+                  className="min-w-56 rounded-xl border border-slate-300 bg-slate-50 px-4 py-2.5 text-sm font-semibold text-slate-900 focus:border-blue-500 focus:outline-hidden focus:ring-2 focus:ring-blue-500"
+                >
+                  {currentDoctor.slots.map((slot) => (
+                    <option key={slot.id} value={slot.id}>
+                      {slot.slot_name} ({formatDoctorSlotTiming(slot)})
+                    </option>
+                  ))}
+                </select>
+                {currentSlot && (
+                  <span className="text-xs font-semibold text-slate-500">
+                    Today&apos;s queue · {currentSlot.slot_name}
+                  </span>
+                )}
+              </div>
+            ) : (
+              <p className="text-sm font-semibold text-amber-700">Configure at least one OPD shift in the doctor profile.</p>
+            )}
+          </div>
+        )}
+
         {previousDayConsultation && (
           <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-800">
             <AlertCircle className="mt-0.5 h-5 w-5 shrink-0" />
             <span>
-              Token {previousDayConsultation.token_number} from a previous clinic day is still marked in consultation.
+              Token {previousDayConsultation.token_code} from a previous clinic day is still marked in consultation.
               Complete or hold it before calling another patient.
             </span>
           </div>
@@ -1519,7 +1575,7 @@ export default function ReceptionDeskPage() {
                       <div className="flex flex-wrap items-center justify-between gap-3">
                         <div className="flex items-center gap-3">
                           <span className="text-5xl font-black text-emerald-600 font-mono tracking-tight">
-                            {currentPatient.token_number}
+                            {currentPatient.token_code}
                           </span>
                         </div>
 
@@ -1594,7 +1650,7 @@ export default function ReceptionDeskPage() {
             <div className="grid grid-cols-1 gap-3 border-t border-slate-100 pt-4 sm:grid-cols-3">
               <button
                 onClick={handleCallNext}
-                disabled={actionLoading || queueTickets.length === 0 || !!currentPatient}
+                disabled={actionLoading || !currentSlot || queueTickets.length === 0 || !!currentPatient}
                 className="flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-6 py-4 text-base font-black text-white shadow-md transition-all hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 <UserCheck className="h-5 w-5" />
@@ -1769,7 +1825,7 @@ export default function ReceptionDeskPage() {
                       <td className="px-6 py-4 text-xs font-bold text-slate-400">{isSkipped || isPreviousDayConsultation ? '—' : waitingPosition + 1}</td>
                       <td className="px-6 py-4 whitespace-nowrap">
                         <span className="px-3 py-1 bg-slate-100 text-slate-900 font-mono font-black text-sm rounded-lg border border-slate-200">
-                          {t.token_number}
+                          {t.token_code}
                         </span>
                       </td>
                       <td className="px-6 py-4">
@@ -2074,7 +2130,7 @@ export default function ReceptionDeskPage() {
 
                   return (
                     <tr key={ticket.id} className="hover:bg-slate-50/80">
-                      <td className="whitespace-nowrap px-4 py-3 font-mono text-xs font-black text-slate-900">{ticket.token_number}</td>
+                      <td className="whitespace-nowrap px-4 py-3 font-mono text-xs font-black text-slate-900">{ticket.token_code}</td>
                       <td className="px-4 py-3">
                         <div className="text-xs font-bold text-slate-900">{ticket.patient_name}</div>
                         <div className="text-[10px] text-slate-500">{ticket.phone_number || 'No phone recorded'}</div>
@@ -2086,13 +2142,15 @@ export default function ReceptionDeskPage() {
                         <span className={`rounded-full px-2.5 py-1 text-[10px] font-extrabold capitalize ${
                           ticket.status === 'completed'
                             ? 'bg-emerald-50 text-emerald-700'
-                            : ticket.status === 'expired' || ticket.status === 'cancelled'
+                            : ticket.status === 'expired'
                               ? 'bg-slate-100 text-slate-600'
-                              : ticket.status === 'skipped'
-                                ? 'bg-amber-50 text-amber-700'
-                                : ticket.status === 'in-consultation'
-                                  ? 'bg-blue-50 text-blue-700'
-                                  : 'bg-indigo-50 text-indigo-700'
+                              : ticket.status === 'cancelled'
+                                ? 'bg-rose-50 text-rose-700'
+                                : ticket.status === 'skipped'
+                                  ? 'bg-amber-50 text-amber-700'
+                                    : ticket.status === 'in-consultation'
+                                      ? 'bg-blue-50 text-blue-700'
+                                      : 'bg-indigo-50 text-indigo-700'
                         }`}>
                           {ticket.status.replaceAll('-', ' ')}
                         </span>
@@ -2171,7 +2229,7 @@ export default function ReceptionDeskPage() {
                 Record payment
               </h3>
               <p className="mt-1 text-xs text-slate-500">
-                {currentPatient.token_number} · {currentPatient.patient_name}
+                {currentPatient.token_code} · {currentPatient.patient_name}
               </p>
             </div>
 
@@ -2389,13 +2447,21 @@ export default function ReceptionDeskPage() {
             </h4>
             <div className="my-4 p-4 bg-slate-50 rounded-xl border border-dashed border-slate-300">
               <span className="text-4xl font-black font-mono text-blue-600">
-                {selectedTicketForPrint.token_number}
+                {selectedTicketForPrint.token_code}
               </span>
               <p className="text-sm font-bold text-slate-800 mt-2">
                 {selectedTicketForPrint.patient_name}
               </p>
               <p className="text-xs text-slate-500">
                 {currentDoctor?.name} ({currentDoctor?.room_number})
+              </p>
+              {selectedTicketForPrint.doctor_slots && (
+                <p className="mt-1 text-xs font-semibold text-slate-600">
+                  {selectedTicketForPrint.doctor_slots.slot_name} · {formatDoctorSlotTiming(selectedTicketForPrint.doctor_slots)}
+                </p>
+              )}
+              <p className="mt-1 text-[11px] text-slate-500">
+                {selectedTicketForPrint.booking_date}
               </p>
               <div className="mt-3 text-[11px] text-slate-400 flex items-center justify-center gap-1">
                 <Clock className="w-3 h-3" />
@@ -2506,7 +2572,7 @@ export default function ReceptionDeskPage() {
                   Reactivate patient?
                 </h3>
                 <p className="mt-1 text-xs text-slate-500">
-                  Token {ticketToReactivate.token_number} will be moved back to the waiting queue.
+                  Token {ticketToReactivate.token_code} will be moved back to the waiting queue.
                 </p>
               </div>
               <button
