@@ -19,9 +19,21 @@ export interface Doctor {
   departments?: Department;
 }
 
+export interface DoctorSlot {
+  id: string;
+  doctor_id: string;
+  slot_name: string;
+  start_time: string;
+  end_time: string;
+  is_active: boolean;
+}
+
 export interface Ticket {
   id: string;
-  token_number: string;
+  token_number: number;
+  token_code: string;
+  slot_id: string | null;
+  booking_date: string;
   patient_name: string;
   phone_number?: string;
   patient_age?: number;

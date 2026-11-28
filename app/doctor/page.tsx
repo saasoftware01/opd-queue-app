@@ -17,23 +17,28 @@ import {
   Send
 } from 'lucide-react';
 import { supabase } from '@/lib/supabase/client';
-import { Ticket, Doctor, Department } from '@/lib/types';
-import { getClinicDayRange } from '@/lib/clinic-day';
+import { Ticket, Doctor, DoctorSlot, Department } from '@/lib/types';
+import { getClinicDateString, getClinicDayRange } from '@/lib/clinic-day';
+import { formatDoctorSlotTiming, getPreferredDoctorSlot } from '@/lib/opd-schedule';
 import { getErrorMessage } from '@/lib/error-message';
 import { readPushNotificationResponse } from '@/lib/push-notification-response';
 
-function getTokenNumber(tokenNumber: string): number {
-  const match = tokenNumber.match(/(\d+)$/);
-  return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
+interface DoctorWithSlots extends Doctor {
+  slots: DoctorSlot[];
 }
 
 export default function DoctorDashboardPage() {
-  const [doctors, setDoctors] = useState<Doctor[]>([]);
+  const [doctors, setDoctors] = useState<DoctorWithSlots[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
   const [selectedDoctorId, setSelectedDoctorId] = useState<string>('');
+  const [selectedSlotId, setSelectedSlotId] = useState<string>('');
   const currentDoctor = useMemo(
     () => doctors.find((doctor) => doctor.id === selectedDoctorId) || null,
     [doctors, selectedDoctorId]
+  );
+  const currentSlot = useMemo(
+    () => currentDoctor?.slots.find((slot) => slot.id === selectedSlotId) || null,
+    [currentDoctor, selectedSlotId]
   );
 
   const [queueTickets, setQueueTickets] = useState<Ticket[]>([]);
@@ -49,19 +54,35 @@ export default function DoctorDashboardPage() {
   useEffect(() => {
     async function initData() {
       try {
-        const [docRes, deptRes] = await Promise.all([
+        const [docRes, deptRes, slotsRes] = await Promise.all([
           supabase.from('doctors').select('*, departments(*)').order('name'),
-          supabase.from('departments').select('*').order('name')
+          supabase.from('departments').select('*').order('name'),
+          supabase
+            .from('doctor_slots')
+            .select('id, doctor_id, slot_name, start_time, end_time, is_active')
+            .eq('is_active', true)
         ]);
 
         if (docRes.error) throw docRes.error;
         if (deptRes.error) throw deptRes.error;
+        if (slotsRes.error) throw slotsRes.error;
 
-        setDoctors(docRes.data || []);
+        const slotsByDoctor = new Map<string, DoctorSlot[]>();
+        (slotsRes.data || []).forEach((slot) => {
+          const currentSlots = slotsByDoctor.get(slot.doctor_id) || [];
+          currentSlots.push(slot);
+          slotsByDoctor.set(slot.doctor_id, currentSlots);
+        });
+        const doctorRecords = (docRes.data || []).map((doctor) => ({
+          ...doctor,
+          slots: slotsByDoctor.get(doctor.id) || [],
+        })) as DoctorWithSlots[];
+        setDoctors(doctorRecords);
         setDepartments(deptRes.data || []);
 
-        if (docRes.data && docRes.data.length > 0) {
-          setSelectedDoctorId(docRes.data[0].id);
+        if (doctorRecords.length > 0) {
+          setSelectedDoctorId(doctorRecords[0].id);
+          setSelectedSlotId(getPreferredDoctorSlot(doctorRecords[0].slots)?.id || '');
         }
       } catch (err: unknown) {
         console.error('Error loading doctor data:', err);
@@ -75,36 +96,34 @@ export default function DoctorDashboardPage() {
   }, []);
 
   useEffect(() => {
-    if (!selectedDoctorId) return;
-    const doc = doctors.find(d => d.id === selectedDoctorId) || null;
-    if (doc) {
-      void fetchQueue(doc.department_id, doc.id);
-    }
-  }, [selectedDoctorId, doctors]);
+    if (!currentDoctor || !currentSlot) return;
+    void fetchQueue(currentDoctor.id, currentSlot.id);
+  }, [currentDoctor, currentSlot]);
 
-  async function fetchQueue(deptId: string, docId: string) {
+  async function fetchQueue(docId: string, slotId: string) {
     try {
       setLoading(true);
-      const { start, end } = getClinicDayRange();
       const { data, error } = await supabase
         .from('tickets')
         .select('*, departments(*), doctors(*)')
-        .eq('department_id', deptId)
+        .eq('doctor_id', docId)
+        .eq('slot_id', slotId)
+        .eq('booking_date', getClinicDateString())
         .in('status', ['waiting', 'in-consultation'])
-        .gte('created_at', start)
-        .lt('created_at', end)
-        .order('created_at', { ascending: true });
+        .order('token_number', { ascending: true });
 
       if (error) throw error;
 
       const tickets = data || [];
       
-      const active = tickets.find(t => t.status === 'in-consultation' && t.doctor_id === docId);
+      const active = tickets.find(t => t.status === 'in-consultation');
       setCurrentPatient(active || null);
 
       const waiting = tickets.filter(t => t.status === 'waiting');
       waiting.sort((a, b) => {
-        const numberDifference = getTokenNumber(a.token_number) - getTokenNumber(b.token_number);
+        if (a.priority === 'emergency' && b.priority !== 'emergency') return -1;
+        if (a.priority !== 'emergency' && b.priority === 'emergency') return 1;
+        const numberDifference = a.token_number - b.token_number;
         if (numberDifference !== 0) return numberDifference;
         return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
       });
@@ -118,24 +137,24 @@ export default function DoctorDashboardPage() {
   }
 
   useEffect(() => {
-    if (!currentDoctor) return;
+    if (!currentDoctor || !currentSlot) return;
 
     let isActive = true;
-    const departmentId = currentDoctor.department_id;
     const doctorId = currentDoctor.id;
+    const slotId = currentSlot.id;
     const channel = supabase
-      .channel(`doctor-queue-changes-${departmentId}`)
+      .channel(`doctor-queue-changes-${doctorId}-${slotId}`)
       .on(
         'postgres_changes',
         {
           event: '*',
           schema: 'public',
           table: 'tickets',
-          filter: `department_id=eq.${departmentId}`,
+          filter: `slot_id=eq.${slotId}`,
         },
         () => {
           if (isActive) {
-            void fetchQueue(departmentId, doctorId);
+            void fetchQueue(doctorId, slotId);
           }
         }
       )
@@ -149,26 +168,29 @@ export default function DoctorDashboardPage() {
       isActive = false;
       supabase.removeChannel(channel);
     };
-  }, [currentDoctor]);
+  }, [currentDoctor, currentSlot]);
 
   useEffect(() => {
-    if (!currentDoctor) return;
+    if (!currentDoctor || !currentSlot) return;
 
     let timeout: number;
     const scheduleNextDayRefresh = () => {
       const { end } = getClinicDayRange();
       timeout = window.setTimeout(() => {
-        void fetchQueue(currentDoctor.department_id, currentDoctor.id);
+        void fetchQueue(currentDoctor.id, currentSlot.id);
         scheduleNextDayRefresh();
       }, new Date(end).getTime() - Date.now() + 100);
     };
 
     scheduleNextDayRefresh();
     return () => window.clearTimeout(timeout);
-  }, [currentDoctor]);
+  }, [currentDoctor, currentSlot]);
 
   const handleCallNext = async () => {
-    if (!currentDoctor) return;
+    if (!currentDoctor || !currentSlot) {
+      setErrorMsg('Select a doctor shift before calling the next token.');
+      return;
+    }
     if (currentPatient) {
       setErrorMsg('Please complete or finish the current patient consultation first.');
       return;
@@ -179,42 +201,21 @@ export default function DoctorDashboardPage() {
     setSuccessMsg('');
 
     try {
-      const { start, end } = getClinicDayRange();
-      const { data: waitingTickets, error: waitingError } = await supabase
-        .from('tickets')
-        .select('id, token_number, patient_name, created_at')
-        .eq('department_id', currentDoctor.department_id)
-        .eq('status', 'waiting')
-        .gte('created_at', start)
-        .lt('created_at', end);
-
-      if (waitingError) throw waitingError;
-
-      const orderedWaitingTickets = (waitingTickets || []).sort((a, b) => {
-        const numberDifference = getTokenNumber(a.token_number) - getTokenNumber(b.token_number);
-        if (numberDifference !== 0) return numberDifference;
-        return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+      const { data, error: callError } = await supabase.rpc('call_next_ticket', {
+        p_doctor_id: currentDoctor.id,
+        p_slot_id: currentSlot.id,
+        p_booking_date: getClinicDateString(),
       });
-      const nextTicket = orderedWaitingTickets[0];
+      if (callError) throw callError;
+      const nextTicket = Array.isArray(data) ? data[0] : data;
 
       if (!nextTicket) {
         setErrorMsg('No waiting patients in the queue.');
         return;
       }
+      setCurrentPatient(nextTicket as Ticket);
 
-      const { error } = await supabase
-        .from('tickets')
-        .update({
-          status: 'in-consultation',
-          doctor_id: currentDoctor.id,
-          called_at: new Date().toISOString()
-        })
-        .eq('id', nextTicket.id)
-        .eq('status', 'waiting');
-
-      if (error) throw error;
-
-      setSuccessMsg(`Called Token ${nextTicket.token_number} (${nextTicket.patient_name})`);
+      setSuccessMsg(`Called Token ${nextTicket.token_code} (${nextTicket.patient_name})`);
       try {
         const { data: { session }, error: sessionError } = await supabase.auth.getSession();
         if (sessionError) throw sessionError;
@@ -230,24 +231,24 @@ export default function DoctorDashboardPage() {
         });
         const result = await readPushNotificationResponse(pushResponse);
         if (result.duplicate) {
-          setErrorMsg(`Token ${nextTicket.token_number} was called, but its push alert was already processed.`);
+          setErrorMsg(`Token ${nextTicket.token_code} was called, but its push alert was already processed.`);
         } else if (result.sent === 0) {
           setErrorMsg(
-            `Token ${nextTicket.token_number} was called successfully, but no patient device is subscribed for alerts. Enable Call alerts from the patient profile menu while this token is active.`
+            `Token ${nextTicket.token_code} was called successfully, but no patient device is subscribed for alerts. Enable Call alerts from the patient profile menu while this token is active.`
           );
         } else if (typeof result.sent === 'number') {
           setSuccessMsg(
-            `Called Token ${nextTicket.token_number} (${nextTicket.patient_name}). Push submitted to ${result.sent} patient device(s).`
+            `Called Token ${nextTicket.token_code} (${nextTicket.patient_name}). Push submitted to ${result.sent} patient device(s).`
           );
         }
       } catch (pushError: unknown) {
         console.error('Patient call push notification failed:', pushError);
         setErrorMsg(
-          `Token ${nextTicket.token_number} was called successfully, but the patient background notification failed: ${getErrorMessage(pushError, 'Unknown push delivery error')}`
+          `Token ${nextTicket.token_code} was called successfully, but the patient background notification failed: ${getErrorMessage(pushError, 'Unknown push delivery error')}`
         );
       }
 
-      fetchQueue(currentDoctor.department_id, currentDoctor.id);
+      if (currentSlot) fetchQueue(currentDoctor.id, currentSlot.id);
     } catch (err: unknown) {
       setErrorMsg(getErrorMessage(err, 'Failed to call next patient'));
     } finally {
@@ -273,9 +274,9 @@ export default function DoctorDashboardPage() {
 
       if (error) throw error;
 
-      setSuccessMsg(`Completed consultation for ${currentPatient.token_number}`);
+      setSuccessMsg(`Completed consultation for ${currentPatient.token_code}`);
       setCurrentPatient(null);
-      fetchQueue(currentDoctor.department_id, currentDoctor.id);
+      if (currentSlot) fetchQueue(currentDoctor.id, currentSlot.id);
     } catch (err: unknown) {
       setErrorMsg(getErrorMessage(err, 'Failed to complete consultation'));
     } finally {
@@ -300,9 +301,9 @@ export default function DoctorDashboardPage() {
 
       if (error) throw error;
 
-      setSuccessMsg(`Skipped token ${currentPatient.token_number}`);
+      setSuccessMsg(`Skipped token ${currentPatient.token_code}`);
       setCurrentPatient(null);
-      fetchQueue(currentDoctor.department_id, currentDoctor.id);
+      if (currentSlot) fetchQueue(currentDoctor.id, currentSlot.id);
     } catch (err: unknown) {
       setErrorMsg(getErrorMessage(err, 'Failed to skip patient'));
     } finally {
@@ -330,11 +331,11 @@ export default function DoctorDashboardPage() {
 
       if (error) throw error;
 
-      setSuccessMsg(`Successfully transferred ${currentPatient.token_number} to new department.`);
+      setSuccessMsg(`Successfully transferred ${currentPatient.token_code} to new department.`);
       setShowTransferModal(false);
       setTargetDeptId('');
       setCurrentPatient(null);
-      fetchQueue(currentDoctor.department_id, currentDoctor.id);
+      if (currentSlot) fetchQueue(currentDoctor.id, currentSlot.id);
     } catch (err: unknown) {
       setErrorMsg(getErrorMessage(err, 'Failed to transfer patient'));
     } finally {
@@ -372,7 +373,15 @@ export default function DoctorDashboardPage() {
             </label>
             <select
               value={selectedDoctorId}
-              onChange={(e) => setSelectedDoctorId(e.target.value)}
+              onChange={(event) => {
+                const doctor = doctors.find((item) => item.id === event.target.value);
+                setSelectedDoctorId(event.target.value);
+                setSelectedSlotId(doctor ? getPreferredDoctorSlot(doctor.slots)?.id || '' : '');
+                if (!doctor?.slots.length) {
+                  setQueueTickets([]);
+                  setCurrentPatient(null);
+                }
+              }}
               className="bg-slate-50 border border-slate-300 text-slate-900 text-sm font-semibold rounded-xl px-4 py-2.5 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-hidden shadow-2xs"
             >
               {doctors.map((doc) => (
@@ -380,6 +389,24 @@ export default function DoctorDashboardPage() {
                   {doc.name} ({doc.room_number})
                 </option>
               ))}
+            </select>
+            <label htmlFor="doctor-shift-select" className="text-xs font-bold text-slate-600 uppercase tracking-wider hidden sm:block">
+              Shift:
+            </label>
+            <select
+              id="doctor-shift-select"
+              value={selectedSlotId}
+              onChange={(event) => setSelectedSlotId(event.target.value)}
+              disabled={!currentDoctor || currentDoctor.slots.length === 0}
+              className="bg-slate-50 border border-slate-300 text-slate-900 text-sm font-semibold rounded-xl px-4 py-2.5 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-hidden shadow-2xs disabled:opacity-50"
+            >
+              {currentDoctor?.slots.length
+                ? currentDoctor.slots.map((slot) => (
+                  <option key={slot.id} value={slot.id}>
+                    {slot.slot_name} ({formatDoctorSlotTiming(slot)})
+                  </option>
+                ))
+                : <option value="">No shifts configured</option>}
             </select>
           </div>
         </div>
@@ -407,6 +434,12 @@ export default function DoctorDashboardPage() {
           </div>
         )}
 
+        {currentDoctor && !currentSlot && (
+          <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-800">
+            Configure at least one active OPD shift for {currentDoctor.name} before managing tokens.
+          </div>
+        )}
+
         {currentDoctor && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
             
@@ -421,7 +454,7 @@ export default function DoctorDashboardPage() {
                   <p className="text-emerald-100 text-sm mt-0.5">Ready for patient consultations</p>
                 </div>
                 <button
-                  onClick={() => currentDoctor && fetchQueue(currentDoctor.department_id, currentDoctor.id)}
+                  onClick={() => currentDoctor && currentSlot && fetchQueue(currentDoctor.id, currentSlot.id)}
                   className="bg-white/10 hover:bg-white/20 border border-white/20 text-white px-4 py-2.5 rounded-xl text-xs font-semibold flex items-center gap-2 transition-colors"
                 >
                   <RefreshCw className="w-4 h-4" />
@@ -453,7 +486,7 @@ export default function DoctorDashboardPage() {
                       <div className="space-y-2">
                         <div className="flex items-center space-x-3">
                           <span className="text-3xl font-black text-emerald-600 font-mono tracking-tight">
-                            {currentPatient.token_number}
+                            {currentPatient.token_code}
                           </span>
                         </div>
                         <h4 className="text-xl font-bold text-slate-900">{currentPatient.patient_name}</h4>
@@ -551,7 +584,7 @@ export default function DoctorDashboardPage() {
                           <div>
                             <div className="flex items-center gap-2">
                               <span className="font-mono font-bold text-sm text-slate-900">
-                                {t.token_number}
+                                {t.token_code}
                               </span>
                             </div>
                             <p className="text-xs text-slate-600 font-medium truncate max-w-[140px]">
@@ -586,7 +619,7 @@ export default function DoctorDashboardPage() {
             <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200">
               <h3 className="text-lg font-bold text-slate-900 mb-2">Transfer Patient</h3>
               <p className="text-xs text-slate-500 mb-4">
-                Transfer Token <span className="font-bold text-emerald-600">{currentPatient.token_number}</span> ({currentPatient.patient_name}) to another department queue.
+                Transfer Token <span className="font-bold text-emerald-600">{currentPatient.token_code}</span> ({currentPatient.patient_name}) to another department queue.
               </p>
 
               <div className="space-y-4">

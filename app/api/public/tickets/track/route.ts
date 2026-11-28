@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import { getClinicDayRange } from '@/lib/clinic-day';
+import { getClinicDateString } from '@/lib/clinic-day';
 import { verifyTicketTrackingCredential } from '@/lib/server/ticket-tracking-link';
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -33,7 +33,11 @@ export async function GET(request: Request) {
     .select(`
       id,
       doctor_id,
+      slot_id,
       token_number,
+      token_code,
+      booking_date,
+      priority,
       patient_name,
       status,
       created_at,
@@ -41,6 +45,11 @@ export async function GET(request: Request) {
         name,
         room_number,
         clinic_name
+      ),
+      doctor_slots (
+        slot_name,
+        start_time,
+        end_time
       )
     `)
     .eq('id', ticketId)
@@ -52,66 +61,73 @@ export async function GET(request: Request) {
   }
   if (!ticket) return response({ error: 'This shared tracking link is invalid or unavailable.' }, 404);
 
-  const { start, end } = getClinicDayRange();
-  const ticketDate = new Date(ticket.created_at);
-  const isOutsideToday = ticketDate < new Date(start) || ticketDate >= new Date(end);
-  const status = isOutsideToday && ['waiting', 'skipped'].includes(ticket.status)
+  const status = ticket.booking_date < getClinicDateString()
+    && ['waiting', 'skipped'].includes(ticket.status)
     ? 'expired'
     : ticket.status;
 
   let nowServingToken: string | null = null;
   let patientsAhead = 0;
-  if (ticket.doctor_id && status === 'waiting') {
+  if (ticket.doctor_id && ticket.slot_id && status === 'waiting') {
     const [
       { data: inCabin, error: inCabinError },
-      { count, error: queueError },
+      { data: waiting, error: queueError },
     ] = await Promise.all([
       admin
         .from('tickets')
-        .select('token_number')
+        .select('token_code')
         .eq('doctor_id', ticket.doctor_id)
+        .eq('slot_id', ticket.slot_id)
+        .eq('booking_date', ticket.booking_date)
         .eq('status', 'in-consultation')
-        .gte('created_at', start)
-        .lt('created_at', end)
         .maybeSingle(),
       admin
         .from('tickets')
-        .select('id', { count: 'exact', head: true })
+        .select('token_number, priority')
         .eq('doctor_id', ticket.doctor_id)
-        .eq('status', 'waiting')
-        .gte('created_at', start)
-        .lt('created_at', end)
-        .lt('created_at', ticket.created_at),
+        .eq('slot_id', ticket.slot_id)
+        .eq('booking_date', ticket.booking_date)
+        .eq('status', 'waiting'),
     ]);
 
     if (inCabinError || queueError) {
       console.error('Shared token queue lookup failed:', inCabinError || queueError);
       return response({ error: 'Unable to load the live queue.' }, 500);
     }
-    nowServingToken = inCabin?.token_number || null;
-    patientsAhead = count || 0;
-  } else if (ticket.doctor_id && status === 'in-consultation') {
+    nowServingToken = inCabin?.token_code || null;
+    patientsAhead = (waiting || []).filter((waitingTicket) =>
+      waitingTicket.priority === 'emergency'
+        ? ticket.priority !== 'emergency' || waitingTicket.token_number < ticket.token_number
+        : ticket.priority !== 'emergency' && waitingTicket.token_number < ticket.token_number
+    ).length;
+  } else if (ticket.doctor_id && ticket.slot_id && status === 'in-consultation') {
     const { data: inCabin, error: inCabinError } = await admin
       .from('tickets')
-      .select('token_number')
+      .select('token_code')
       .eq('doctor_id', ticket.doctor_id)
+      .eq('slot_id', ticket.slot_id)
+      .eq('booking_date', ticket.booking_date)
       .eq('status', 'in-consultation')
-      .gte('created_at', start)
-      .lt('created_at', end)
       .maybeSingle();
     if (inCabinError) {
       console.error('Shared token now-serving lookup failed:', inCabinError);
       return response({ error: 'Unable to load the live queue.' }, 500);
     }
-    nowServingToken = inCabin?.token_number || null;
+    nowServingToken = inCabin?.token_code || null;
   }
 
   const doctor = Array.isArray(ticket.doctors) ? ticket.doctors[0] : ticket.doctors;
+  const slot = Array.isArray(ticket.doctor_slots) ? ticket.doctor_slots[0] : ticket.doctor_slots;
   return response({
     ticket: {
       id: ticket.id,
       doctor_id: ticket.doctor_id,
       token_number: ticket.token_number,
+      token_code: ticket.token_code,
+      booking_date: ticket.booking_date,
+      slot_name: slot?.slot_name || 'OPD',
+      slot_start_time: slot?.start_time || '',
+      slot_end_time: slot?.end_time || '',
       patient_name: ticket.patient_name,
       status,
       created_at: ticket.created_at,

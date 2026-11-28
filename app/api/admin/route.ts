@@ -112,8 +112,8 @@ export async function GET(request: Request) {
 
       const { data: tickets, error: ticketError } = await auth.admin
         .from('tickets')
-        .select('id, token_number, status, doctor_id, created_at')
-        .eq('token_number', tokenNumber)
+        .select('id, token_code, status, doctor_id, created_at')
+        .eq('token_code', tokenNumber)
         .order('created_at', { ascending: false })
         .limit(20);
 
@@ -163,7 +163,7 @@ export async function GET(request: Request) {
           const clinic = doctor?.clinic_id ? clinicById.get(doctor.clinic_id) : null;
           return {
             id: ticket.id,
-            token_number: ticket.token_number,
+            token_code: ticket.token_code,
             status: ticket.status,
             created_at: ticket.created_at,
             doctor_name: doctor?.name || 'Unassigned',

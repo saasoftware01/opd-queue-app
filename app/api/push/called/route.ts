@@ -21,7 +21,7 @@ export async function POST(request: Request) {
 
   const { data: ticket, error: ticketError } = await auth.admin
     .from('tickets')
-    .select('id, token_number, doctor_id, status, called_at')
+    .select('id, token_code, doctor_id, status, called_at')
     .eq('id', body.ticketId)
     .maybeSingle();
 
@@ -96,8 +96,8 @@ export async function POST(request: Request) {
 
   const payload = JSON.stringify({
     title: 'It’s your turn',
-    body: `Token ${ticket.token_number} has been called. Please proceed to the consultation room.`,
-    tokenNumber: ticket.token_number,
+    body: `Token ${ticket.token_code} has been called. Please proceed to the consultation room.`,
+    tokenNumber: ticket.token_code,
     url: '/book',
   });
 

@@ -66,7 +66,7 @@ interface AdminClinic {
 
 interface AdminTicket {
   id: string;
-  token_number: string;
+  token_code: string;
   status: string;
   created_at: string;
   doctor_name: string;
@@ -569,7 +569,7 @@ export default function AdminPage() {
                       {tickets.map((ticket) => (
                         <li key={ticket.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
                           <div>
-                            <p className="font-bold">{ticket.token_number} <span className="ml-2 rounded-full bg-blue-50 px-2 py-1 text-xs font-semibold capitalize text-blue-700">{statusLabel(ticket.status)}</span></p>
+                            <p className="font-bold">{ticket.token_code} <span className="ml-2 rounded-full bg-blue-50 px-2 py-1 text-xs font-semibold capitalize text-blue-700">{statusLabel(ticket.status)}</span></p>
                             <p className="mt-1 text-sm text-slate-600">{ticket.clinic_name} · {ticket.doctor_name}</p>
                           </div>
                           <p className="text-xs text-slate-500">Booked {formatDate(ticket.created_at)}</p>

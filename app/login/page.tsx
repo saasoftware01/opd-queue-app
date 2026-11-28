@@ -239,7 +239,7 @@ export default function LoginPage() {
         {/* Footer pill */}
         <div className="relative z-10 text-[11px] text-slate-400 flex items-center gap-2">
           <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-          <span>Multi-tenant isolation with end-to-end security</span>
+          <span>Private and secure clinic workspace</span>
         </div>
       </div>
 
@@ -397,14 +397,23 @@ export default function LoginPage() {
           {/* Bottom Security Note */}
           <div className="mt-6 text-center">
             <span className="text-[11px] text-slate-600 font-medium">
-              Encrypted session · Multi-tenant token isolation
+              Privacy-focused · Secure Clinic Portal
             </span>
-            <Link
-              href="/terms-and-conditions"
-              className="mt-2 block text-[11px] font-semibold text-blue-600 hover:text-blue-700 hover:underline"
-            >
-              Terms &amp; Conditions
-            </Link>
+            <nav aria-label="Legal information" className="mt-2 flex items-center justify-center gap-2 text-[11px] font-semibold">
+              <Link
+                href="/terms-and-conditions"
+                className="text-blue-600 hover:text-blue-700 hover:underline"
+              >
+                Terms &amp; Conditions
+              </Link>
+              <span aria-hidden="true" className="text-slate-400">·</span>
+              <Link
+                href="/privacy-policy"
+                className="text-blue-600 hover:text-blue-700 hover:underline"
+              >
+                Privacy Policy
+              </Link>
+            </nav>
           </div>
 
         </div>
