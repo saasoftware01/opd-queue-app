@@ -242,7 +242,6 @@ export default function ReceptionDeskPage() {
     const url = new URL('/book', window.location.origin);
     url.searchParams.set('clinic_id', currentDoctor.clinic_id);
     url.searchParams.set('doctor_id', currentDoctor.id);
-    url.searchParams.set('show_doctor_popup', '1');
     return url.toString();
   }, [currentDoctor]);
 
@@ -1557,10 +1556,6 @@ export default function ReceptionDeskPage() {
               {currentPatient ? (
                 (() => {
                   const rawNotes = (currentPatient.notes || '').trim();
-                  const upperNotes = rawNotes.toUpperCase();
-                  const hasUpi = upperNotes.includes('UPI');
-                  const hasCash = upperNotes.includes('CASH');
-                  const paymentLabel = hasUpi ? 'UPI' : hasCash ? 'Cash' : 'Paid';
 
                   // Thorough clean: remove payment indicators, system tags, and any leftover brackets
                   const cleanNote = rawNotes
@@ -1571,22 +1566,9 @@ export default function ReceptionDeskPage() {
 
                   return (
                     <div className="py-4 space-y-3">
-                      {/* Token & Payment Header */}
-                      <div className="flex flex-wrap items-center justify-between gap-3">
-                        <div className="flex items-center gap-3">
-                          <span className="text-5xl font-black text-emerald-600 font-mono tracking-tight">
-                            {currentPatient.token_code}
-                          </span>
-                        </div>
-
-                        {/* Single Rupee Payment Badge */}
-                        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-bold bg-slate-100 text-slate-700 border border-slate-200/80">
-                          <IndianRupee className="w-3.5 h-3.5 text-slate-500" />
-                          <span className="font-extrabold text-slate-900">{consultationFee}</span>
-                          <span className="text-slate-300">·</span>
-                          <span className="text-emerald-700 font-extrabold">{paymentLabel}</span>
-                        </span>
-                      </div>
+                      <span className="text-5xl font-black text-emerald-600 font-mono tracking-tight">
+                        {currentPatient.token_code}
+                      </span>
 
                       {/* Patient Name & Metadata */}
                       <div>

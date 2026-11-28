@@ -487,8 +487,6 @@ function DoctorBookingDirectoryContent() {
   const urlTicketSignature = credentialSeparator >= 0
     ? urlTrackingCredential?.slice(credentialSeparator + 1) || ''
     : null;
-  const showDoctorPopup = searchParams?.get('show_doctor_popup') === '1';
-
   // Tabs: 'DIRECTORY' or 'TRACKER'
   const [activeTab, setActiveTab] = useState<'DIRECTORY' | 'TRACKER'>(
     () => searchParams?.get('ticket_id') ? 'TRACKER' : 'DIRECTORY'
@@ -1769,11 +1767,7 @@ function DoctorBookingDirectoryContent() {
         if (urlDoctorId) {
           const matched = formatted.find(d => d.id === urlDoctorId);
           if (matched) {
-            if (showDoctorPopup) {
-              setDetailsDoctor(matched);
-            } else {
-              setSelectedDoctor(matched);
-            }
+            setDetailsDoctor(matched);
           }
         }
       } catch (err: unknown) {
@@ -1789,7 +1783,7 @@ function DoctorBookingDirectoryContent() {
     return () => {
       isMounted = false;
     };
-  }, [urlDoctorId, urlClinicId, showDoctorPopup, directoryRefreshKey]);
+  }, [urlDoctorId, urlClinicId, directoryRefreshKey]);
 
   useEffect(() => {
     let refreshTimeout: ReturnType<typeof setTimeout> | undefined;
@@ -4100,7 +4094,7 @@ function DoctorBookingDirectoryContent() {
                     setErrorMsg('');
                     setAuthError('');
                     setAuthNotice('');
-                    if (authReady && !currentUser) setShowAuthModal(true);
+                    if (!currentUser) setShowAuthModal(true);
                   }}
                   className="inline-flex items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 py-3 text-xs font-bold text-white shadow-lg shadow-blue-900/15 transition-all hover:bg-blue-700 hover:shadow-xl disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-600 disabled:shadow-none"
                 >
@@ -4376,7 +4370,7 @@ function DoctorBookingDirectoryContent() {
         </div>
       )}
 
-      {(showAuthModal || (authReady && Boolean(selectedDoctor) && !currentUser)) && (
+      {showAuthModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 backdrop-blur-xs p-4 animate-in fade-in duration-150">
           <div
             role="dialog"
